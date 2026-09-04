@@ -1,0 +1,19 @@
+{
+	"manifest_version": 2,
+	"name": "Zotero GitHub Sync",
+	"version": "0.1.0",
+	"description": "Sync your Zotero library (metadata, notes, and optionally attachments) to a public or private GitHub repository -- manually, from a button, or on a schedule.",
+	"homepage_url": "https://github.com/situkangsayur/zotero-github-plugin",
+	"author": "situkangsayur",
+	"icons": {
+		"48": "content/icons/github-48.svg",
+		"96": "content/icons/github-96.svg"
+	},
+	"applications": {
+		"zotero": {
+			"id": "zotero-github-sync@situkangsayur.github.io",
+			"update_url": "https://raw.githubusercontent.com/situkangsayur/zotero-github-plugin/main/update.json",
+			"strict_min_version": "6.999"
+		}
+	}
+}

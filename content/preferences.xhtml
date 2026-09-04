@@ -1,0 +1,186 @@
+<vbox id="zotero-github-sync-prefpane"
+		onload="ZoteroGitHubSyncPrefs.init()"
+		onunload="ZoteroGitHubSyncPrefs.uninit()">
+	<vbox class="main-section">
+
+		<groupbox>
+			<label><html:h2>GitHub account</html:h2></label>
+
+			<html:div class="zgs-hint">
+				Create a token at
+				<html:span class="zgs-mono">github.com/settings/tokens</html:span>.
+				A fine-grained token needs <html:b>Contents: Read and write</html:b> on the
+				target repository; a classic token needs the <html:b>repo</html:b> scope.
+				The token is stored in Zotero's password manager, not in the preferences file.
+			</html:div>
+
+			<hbox align="center">
+				<label control="zgs-token" value="Personal access token"/>
+				<html:input id="zgs-token" type="password" flex="1"
+						placeholder="github_pat_… or ghp_…"/>
+			</hbox>
+
+			<hbox align="center" pack="start">
+				<button id="zgs-save-token" label="Save token"
+						oncommand="ZoteroGitHubSyncPrefs.saveToken()"/>
+				<button id="zgs-clear-token" label="Remove token"
+						oncommand="ZoteroGitHubSyncPrefs.clearToken()"/>
+				<button id="zgs-test" label="Test connection"
+						oncommand="ZoteroGitHubSyncPrefs.testConnection()"/>
+			</hbox>
+
+			<html:div id="zgs-token-status" class="zgs-status"/>
+		</groupbox>
+
+		<groupbox>
+			<label><html:h2>Repository</html:h2></label>
+
+			<hbox align="center">
+				<label control="zgs-owner" value="Owner (user or organization)"/>
+				<html:input id="zgs-owner" type="text" flex="1"
+						preference="extensions.zotero-github-sync.owner"
+						placeholder="situkangsayur"/>
+			</hbox>
+
+			<hbox align="center">
+				<label control="zgs-repo" value="Repository"/>
+				<html:input id="zgs-repo" type="text" flex="1"
+						preference="extensions.zotero-github-sync.repo"
+						placeholder="my-zotero-library"/>
+			</hbox>
+
+			<hbox align="center">
+				<label control="zgs-branch" value="Branch"/>
+				<html:input id="zgs-branch" type="text" size="20"
+						preference="extensions.zotero-github-sync.branch"/>
+			</hbox>
+
+			<hbox align="center">
+				<label control="zgs-base-path" value="Folder inside the repository"/>
+				<html:input id="zgs-base-path" type="text" flex="1"
+						preference="extensions.zotero-github-sync.basePath"
+						placeholder="zotero (leave empty for the repository root)"/>
+			</hbox>
+
+			<checkbox label="Create the repository if it does not exist"
+					preference="extensions.zotero-github-sync.autoCreateRepo"/>
+			<checkbox label="Create it as a private repository"
+					preference="extensions.zotero-github-sync.repoPrivate"/>
+
+			<hbox align="center">
+				<label control="zgs-api-url" value="API URL (GitHub Enterprise)"/>
+				<html:input id="zgs-api-url" type="text" flex="1"
+						preference="extensions.zotero-github-sync.apiURL"/>
+			</hbox>
+		</groupbox>
+
+		<groupbox>
+			<label><html:h2>What gets synced</html:h2></label>
+
+			<checkbox label="Item metadata as JSON (needed for Import from GitHub)"
+					preference="extensions.zotero-github-sync.exportJSON"/>
+			<checkbox label="Markdown notes with YAML front matter (readable in Obsidian)"
+					preference="extensions.zotero-github-sync.exportMarkdown"/>
+			<checkbox label="Table of contents (index.md and README.md)"
+					preference="extensions.zotero-github-sync.exportIndex"/>
+			<checkbox label="BibTeX export (library.bib)"
+					preference="extensions.zotero-github-sync.exportBibTeX"/>
+			<checkbox label="Child notes"
+					preference="extensions.zotero-github-sync.includeNotes"/>
+			<checkbox label="Group libraries"
+					preference="extensions.zotero-github-sync.includeGroupLibraries"/>
+			<checkbox id="zgs-include-attachments" label="Attachment files (PDFs and other stored files)"
+					preference="extensions.zotero-github-sync.includeAttachments"/>
+
+			<hbox align="center" class="zgs-indent">
+				<label control="zgs-max-attachment" value="Skip attachments larger than"/>
+				<html:input id="zgs-max-attachment" type="text" size="5"
+						preference="extensions.zotero-github-sync.maxAttachmentMB"/>
+				<label value="MB"/>
+			</hbox>
+
+			<html:div class="zgs-hint">
+				GitHub rejects files over 100 MB and warns above 50 MB, and a repository full of
+				PDFs gets large quickly. Leaving attachments off keeps the repository small and
+				still captures every item, note and tag.
+			</html:div>
+
+			<checkbox label="Remove files from the repository when their items are deleted"
+					preference="extensions.zotero-github-sync.prune"/>
+			<html:div class="zgs-hint">
+				Only files this plugin wrote are ever removed. Anything else in the repository is
+				left alone.
+			</html:div>
+		</groupbox>
+
+		<groupbox>
+			<label><html:h2>When to sync</html:h2></label>
+
+			<hbox align="center">
+				<checkbox id="zgs-interval-enabled" label="Sync every"
+						preference="extensions.zotero-github-sync.intervalEnabled"/>
+				<html:input id="zgs-interval-minutes" type="text" size="5"
+						preference="extensions.zotero-github-sync.intervalMinutes"/>
+				<label value="minutes"/>
+			</hbox>
+
+			<hbox align="center">
+				<checkbox id="zgs-sync-on-change" label="Sync after the library changes, waiting"
+						preference="extensions.zotero-github-sync.syncOnChange"/>
+				<html:input id="zgs-change-delay" type="text" size="5"
+						preference="extensions.zotero-github-sync.changeDelayMinutes"/>
+				<label value="minutes for edits to settle"/>
+			</hbox>
+
+			<checkbox label="Sync shortly after Zotero starts"
+					preference="extensions.zotero-github-sync.syncOnStartup"/>
+
+			<html:div class="zgs-hint">
+				A sync that finds nothing to change makes no commit, so a short interval is cheap
+				in repository history -- but it still costs GitHub API calls.
+			</html:div>
+		</groupbox>
+
+		<groupbox>
+			<label><html:h2>Commits</html:h2></label>
+
+			<hbox align="center">
+				<label control="zgs-commit-message" value="Message template"/>
+				<html:input id="zgs-commit-message" type="text" flex="1"
+						preference="extensions.zotero-github-sync.commitMessage"/>
+			</hbox>
+			<html:div class="zgs-hint">
+				Placeholders: <html:span class="zgs-mono">{changes} {added} {updated} {deleted}
+				{trigger} {date}</html:span>
+			</html:div>
+
+			<hbox align="center">
+				<label control="zgs-author-name" value="Commit author name (optional)"/>
+				<html:input id="zgs-author-name" type="text" flex="1"
+						preference="extensions.zotero-github-sync.authorName"/>
+			</hbox>
+
+			<hbox align="center">
+				<label control="zgs-author-email" value="Commit author email (optional)"/>
+				<html:input id="zgs-author-email" type="text" flex="1"
+						preference="extensions.zotero-github-sync.authorEmail"/>
+			</hbox>
+		</groupbox>
+
+		<groupbox>
+			<label><html:h2>Status</html:h2></label>
+
+			<html:div id="zgs-status" class="zgs-status"/>
+
+			<hbox align="center" pack="start">
+				<button id="zgs-sync-now" label="Sync now"
+						oncommand="ZoteroGitHubSyncPrefs.syncNow()"/>
+				<button id="zgs-pull" label="Import from GitHub…"
+						oncommand="ZoteroGitHubSyncPrefs.pull()"/>
+				<button id="zgs-open-repo" label="Open repository"
+						oncommand="ZoteroGitHubSyncPrefs.openRepo()"/>
+			</hbox>
+		</groupbox>
+
+	</vbox>
+</vbox>
