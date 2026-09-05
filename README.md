@@ -7,6 +7,10 @@ whenever the library changes.
 
 Works with Zotero 7 and later.
 
+> **Status:** 0.1.0 is a first release. Its logic is unit-tested, but it has not yet been
+> exercised against a live Zotero install and a real GitHub repository. Point it at a
+> throwaway repository first. See [CHANGELOG.md](CHANGELOG.md#verification-status).
+
 ---
 
 ## What it does
@@ -27,6 +31,18 @@ Works with Zotero 7 and later.
 It is not a replacement for Zotero's own sync, and not a two-way sync engine. The
 authoritative copy lives in Zotero; the repository is a versioned, readable mirror.
 Import only ever adds or refreshes items — it never deletes anything locally.
+
+## Documentation
+
+- **[docs/DATA-FORMAT.md](docs/DATA-FORMAT.md)** — exactly what lands in the repository:
+  directory layout, the item JSON schema, front-matter fields, naming rules, and what to
+  build on if you want to read the data from another tool.
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — how the sync pipeline works, why it
+  uses the Git Data API, why the export has to be byte-deterministic, and how pruning
+  avoids touching files it did not write.
+- **[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)** — building, running from source,
+  debugging, testing, and releasing.
+- **[CHANGELOG.md](CHANGELOG.md)** — what changed, and what is known not to work yet.
 
 ---
 
@@ -112,7 +128,9 @@ something goes wrong.
         └── WXYZ5678/paper.pdf             optional
 ```
 
-Group libraries land in `group-<groupID>-<name>/` with the same structure.
+Group libraries land in `group-<groupID>-<name>/` with the same structure. The full spec —
+field by field, including what is safe to depend on — is in
+[docs/DATA-FORMAT.md](docs/DATA-FORMAT.md).
 
 Each `items/<KEY>.json` holds two objects: `zotero` (the untouched Zotero API JSON, which
 is what *Import from GitHub* reads back) and `meta` (derived fields — resolved collection
@@ -186,22 +204,7 @@ npm run build          # writes build/zotero-github-sync-<version>.xpi
 ```
 
 The build script has no dependencies — it writes the XPI directly with Node's standard
-library.
-
-### Running from source
-
-Zotero can load a plugin from a directory, which avoids rebuilding on every change:
-
-1. Find your [Zotero profile directory](https://www.zotero.org/support/kb/profile_directory).
-2. Create `extensions/zotero-github-sync@situkangsayur.github.io` (a *file*, not a folder)
-   containing the absolute path to your clone.
-3. In `prefs.js`, set `extensions.lastAppBuildId` and `extensions.lastAppVersion` to
-   empty strings so Zotero re-reads the extensions directory.
-4. Start Zotero with `-ZoteroDebugText -jsconsole` to see plugin logs.
-
-Plugin log lines are prefixed with `[GitHub Sync]` in **Help → Debug Output Logging**.
-
-### Layout
+library, so there is nothing to `npm install`.
 
 | File | Responsibility |
 | --- | --- |
@@ -216,8 +219,9 @@ Plugin log lines are prefixed with `[GitHub Sync]` in **Help → Debug Output Lo
 | `src/ui.js` | Toolbar button and menus |
 | `content/` | Preference pane |
 
-Adding a language means adding one key to `_strings` in `src/core.js`. English and
-Indonesian ship today.
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) covers running from a directory without
+rebuilding, debugging, testing the pure logic under plain Node, what to exercise against a
+throwaway repository, and the release process.
 
 ---
 
@@ -254,6 +258,12 @@ Setiap item disimpan sebagai JSON (bisa diimpor kembali) dan catatan Markdown de
 front matter sehingga repositori bisa langsung dibuka di Obsidian. Sinkronisasi yang tidak
 menemukan perubahan tidak membuat commit. Lampiran (PDF) mati secara bawaan karena ukuran
 repositori cepat membengkak — nyalakan di pengaturan bila diperlukan.
+
+Versi 0.1.0 belum pernah diuji di dalam Zotero yang benar-benar berjalan, jadi cobalah
+dulu dengan repositori percobaan. Rincian format berkas ada di
+[docs/DATA-FORMAT.md](docs/DATA-FORMAT.md), cara kerja mesin sinkronisasinya di
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), dan panduan pengembangan di
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ---
 
