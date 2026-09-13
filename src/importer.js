@@ -379,7 +379,33 @@ ZoteroGitHubSync.Importer = {
 				delete prepared.path;
 			}
 		}
-		return prepared;
+		return this.orderForFromJSON(prepared);
+	},
+
+
+	// Zotero.Item.prototype.fromJSON() applies fields in the order it meets them,
+	// and some fields refuse to be set before others: an attachment's path or
+	// filename needs its link mode, and every annotation field needs the type.
+	// The exporter sorts keys alphabetically, which puts them the wrong way round.
+	FROM_JSON_FIRST: ['itemType', 'parentItem', 'linkMode', 'contentType', 'charset', 'annotationType'],
+
+	/**
+	 * @param {Object} json
+	 * @return {Object} The same fields, with the ones fromJSON() depends on first
+	 */
+	orderForFromJSON(json) {
+		let ordered = {};
+		for (let key of this.FROM_JSON_FIRST) {
+			if (key in json) {
+				ordered[key] = json[key];
+			}
+		}
+		for (let [key, value] of Object.entries(json)) {
+			if (!(key in ordered)) {
+				ordered[key] = value;
+			}
+		}
+		return ordered;
 	},
 
 

@@ -177,6 +177,25 @@ Follows the Zotero codebase: tabs, `let` over `const` except for true constants,
 brace on the same line with `else`/`catch` on their own, and two hyphens rather than an em
 dash in comments. Comments explain why, not what.
 
+## Testing Import from GitHub end to end
+
+`scripts/import-test/` restores a real repository into an empty, headless profile and
+reports what arrived. The addon reads the token from a file, so it never appears in a
+command line or log:
+
+```bash
+ssh host 'umask 077; mkdir -p ~/.config/zotero-github-sync; cat > ~/.config/zotero-github-sync/token' < token.txt
+scp build/zotero-github-sync-<version>.xpi host:zgs-import-test/zotero-github-sync.xpi
+scp zgs-import-test.xpi host:zgs-import-test/zgs-import-test.xpi   # zip of scripts/import-test/addon
+(echo 'export ZGS_OWNER=me ZGS_REPO=my-library ZGS_BASE_PATH=zotero'; cat scripts/import-test/run-remote.sh) | ssh host 'bash -s'
+```
+
+It returns once Zotero is running; `~/zgs-import-test/out/DONE` appears when the import
+ends, next to `report.json` (items by type, attachments with and without files,
+collections, searches, tag colors, warnings). To check the files themselves, compare
+`sha256sum` of every file under `storage/` in the source data directory and in
+`~/zgs-import-test/data`.
+
 ## Tutorial screenshots
 
 The images in `docs/images/` come from a real Zotero, not mockups, in a throwaway profile

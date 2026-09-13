@@ -1,0 +1,14 @@
+{
+	"manifest_version": 2,
+	"name": "Zotero GitHub Sync -- Import Test",
+	"version": "0.0.1",
+	"description": "DEVELOPMENT ONLY. In a throwaway profile, imports a repository with Import from GitHub, writes a report, and quits. Never install in a real profile.",
+	"applications": {
+		"zotero": {
+			"id": "zgs-import-test@situkangsayur.github.io",
+			"update_url": "https://example.invalid/none.json",
+			"strict_min_version": "6.999",
+			"strict_max_version": "10.*"
+		}
+	}
+}

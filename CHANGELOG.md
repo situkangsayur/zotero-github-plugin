@@ -4,7 +4,25 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.0] — unreleased
+## [0.2.1] — 2026-09-13
+
+### Fixed
+
+- **Import from GitHub skipped every attachment and annotation.** Zotero's `fromJSON()`
+  applies fields in key order and refuses an attachment's filename before its link mode, or
+  any annotation field before its type; the exporter's alphabetical keys put them the wrong
+  way round, so 0.2.0 restored metadata and notes but no files. The importer now puts the
+  fields `fromJSON()` depends on first.
+
+### Verification status
+
+*Import from GitHub* run end to end in an empty headless profile on Zotero 10 against the
+repository written by the 0.2.0 sync: all 1,740 top-level items, 288 attachments, 42
+annotations, 41 notes and 58 collections were created, with counts per item type identical
+to the source library, and all 195 attachment files (two from Git LFS) restored with
+SHA-256 hashes identical to the originals. It took about nine minutes.
+
+## [0.2.0] — 2026-09-13
 
 Makes the repository hold the whole library, files included. Not yet exercised inside a
 running Zotero — see the verification note below.

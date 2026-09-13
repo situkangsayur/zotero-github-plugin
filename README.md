@@ -13,10 +13,11 @@ Works with Zotero 7 through 10.
 **[Step-by-step tutorial](docs/TUTORIAL.md)** ·
 **[Tutorial (Bahasa Indonesia)](docs/TUTORIAL.id.md)**
 
-> **Status:** 0.2.0 is new. A first sync of a 1,740-item library with about 700 MB of PDFs
-> has run on Zotero 10 (Linux) against a private repository; *Import from GitHub* has not
-> been tried end to end yet. Try it on a repository you can throw away first. See
-> [CHANGELOG.md](CHANGELOG.md#verification-status).
+> **Status:** tested on Zotero 10 (Linux) with a 1,740-item library and about 700 MB of
+> PDFs: a first sync into an empty private repository, and a full *Import from GitHub* into an
+> empty profile that restored every item, annotation and file byte for byte. Other Zotero
+> versions, group libraries and two-computer setups are less tested. See
+> [CHANGELOG.md](CHANGELOG.md).
 
 ---
 

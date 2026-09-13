@@ -92,4 +92,11 @@ let waited = null;
 const t1 = Date.now();
 for (let i = 0; i < 4; i++) await limiter.acquire({ onWait: until => { waited = until; } });
 assert.ok(waited && Date.now() - t1 >= 150, 'fourth request waited for the window');
+// fromJSON() ordering: link mode and annotation type before dependent fields
+const orderedAttachment = Object.keys(I.orderForFromJSON({ contentType: 'application/pdf', filename: 'a.pdf', itemType: 'attachment', linkMode: 'imported_file', parentItem: 'ABCD1234', title: 'PDF' }));
+assert.ok(orderedAttachment.indexOf('linkMode') < orderedAttachment.indexOf('filename'));
+assert.equal(orderedAttachment[0], 'itemType');
+const orderedAnnotation = Object.keys(I.orderForFromJSON({ annotationColor: '#ffd400', annotationComment: 'x', annotationType: 'highlight', itemType: 'annotation', parentItem: 'WXYZ5678' }));
+assert.ok(orderedAnnotation.indexOf('annotationType') < orderedAnnotation.indexOf('annotationColor'));
+assert.equal(orderedAnnotation.length, 5);
 console.log('all pure-logic tests passed');

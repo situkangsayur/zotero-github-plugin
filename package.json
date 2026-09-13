@@ -1,6 +1,6 @@
 {
 	"name": "zotero-github-sync",
-	"version": "0.2.0",
+	"version": "0.2.1",
 	"private": true,
 	"description": "Zotero plugin that syncs a library to a GitHub repository",
 	"type": "module",
