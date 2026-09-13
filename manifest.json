@@ -1,7 +1,7 @@
 {
 	"manifest_version": 2,
 	"name": "Zotero GitHub Sync",
-	"version": "0.3.0",
+	"version": "0.3.1",
 	"description": "Back up your whole Zotero library -- metadata, notes, annotations and PDFs -- to a public or private GitHub repository, with Git LFS for large files.",
 	"homepage_url": "https://github.com/situkangsayur/zotero-github-plugin",
 	"author": "situkangsayur",

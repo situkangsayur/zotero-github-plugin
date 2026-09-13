@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] — 2026-09-14
+
+### Fixed
+
+- The collection context menu and Tools menu commands did nothing on Zotero 10: they called
+  `ZoteroPane.getSelectedCollection()`, which Zotero 10 removed (it now throws). The plugin uses
+  `getSelectedCollections()` where available.
+
 ## [0.3.0] — 2026-09-13
 
 ### Added

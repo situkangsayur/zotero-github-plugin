@@ -10,6 +10,27 @@ ZoteroGitHubSync.UI = {
 	_added: new WeakMap(),
 	_windows: new Set(),
 
+	/**
+	 * The collection selected in a window's collection tree, or null. Zotero 10
+	 * removed ZoteroPane.getSelectedCollection() (it throws) in favour of
+	 * getSelectedCollections(); older versions only have the former.
+	 */
+	selectedCollection(win) {
+		let pane = win?.ZoteroPane;
+		if (!pane) {
+			return null;
+		}
+		try {
+			if (typeof pane.getSelectedCollections === 'function') {
+				return pane.getSelectedCollections()[0] || null;
+			}
+			return pane.getSelectedCollection() || null;
+		}
+		catch (e) {
+			return null;
+		}
+	},
+
 
 	addToWindow(win) {
 		if (this._added.has(win)) {
@@ -247,7 +268,7 @@ ZoteroGitHubSync.UI = {
 		menuitem.addEventListener('command', () => this._syncSelectedCollection(win));
 
 		let onPopupShowing = () => {
-			let collection = win.ZoteroPane?.getSelectedCollection?.();
+			let collection = this.selectedCollection(win);
 			menuitem.hidden = !(collection && ZoteroGitHubSync.Prefs.hasRepoConfig());
 		};
 		collectionMenu.addEventListener('popupshowing', onPopupShowing);
@@ -348,7 +369,7 @@ ZoteroGitHubSync.UI = {
 
 	async _syncSelectedCollection(win) {
 		try {
-			let collection = win.ZoteroPane?.getSelectedCollection?.();
+			let collection = this.selectedCollection(win);
 			if (!collection) {
 				return;
 			}
