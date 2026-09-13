@@ -157,6 +157,8 @@ exactly what `Zotero.Item.prototype.toJSON()` returns minus `version`. That numb
 every time Zotero's own sync touches an item, even when nothing about it changed, so keeping
 it would add commits that record nothing. Its `collections` array holds collection *keys*.
 
+Annotations never get a file of their own; they are only under their attachment.
+
 **`children`** holds every descendant in the same format, sorted by key: child notes,
 child attachments, the annotations on any attachment (including a standalone one), and the
 images embedded in notes. Each child's `parentItem` names its direct parent, so an

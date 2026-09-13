@@ -35,6 +35,8 @@ ZoteroGitHubSync.Sync = {
 
 	status: 'idle',
 	lastResult: null,
+	pendingReview: 0,
+	_pendingNotified: false,
 	progress: null,
 
 	_running: false,
@@ -54,6 +56,10 @@ ZoteroGitHubSync.Sync = {
 
 	init() {
 		this._limiter = new ZoteroGitHubSync.RateLimiter([{ ms: 60 * 1000, max: 70 }]);
+		this.pendingReview = Number(ZoteroGitHubSync.Prefs.get('pendingReview')) || 0;
+		if (this.pendingReview) {
+			this.status = 'attention';
+		}
 		ZoteroGitHubSync.Prefs.observe(
 			['intervalEnabled', 'intervalMinutes', 'syncOnChange', 'changeDelayMinutes'],
 			() => this.updateSchedule()
@@ -87,6 +93,7 @@ ZoteroGitHubSync.Sync = {
 
 
 	shutdown() {
+		ZoteroGitHubSync.Review?.close();
 		this.cancel();
 		this._clearTimer('_intervalTimer', true);
 		this._clearTimer('_changeTimer');
@@ -286,7 +293,7 @@ ZoteroGitHubSync.Sync = {
 	 * @param {Boolean} [options.silent] - Don't open a progress window
 	 * @return {Promise<Object>} { status, added, updated, deleted, commit, warnings }
 	 */
-	async syncNow({ trigger = 'manual', items = null, silent = false } = {}) {
+	async syncNow({ trigger = 'manual', items = null, silent = false, forceReview = false } = {}) {
 		if (this._running) {
 			if (!silent) {
 				// Already visible on the toolbar button; reopen the window rather
@@ -321,7 +328,7 @@ ZoteroGitHubSync.Sync = {
 		}
 
 		try {
-			let result = await this._runSyncWithRetry({ config, token, items, trigger });
+			let result = await this._runSyncWithRetry({ config, token, items, trigger, silent, forceReview });
 			ZoteroGitHubSync.Prefs.set('lastSync', ZoteroGitHubSync.Utils.isoDate());
 			ZoteroGitHubSync.Prefs.set('lastError', '');
 			ZoteroGitHubSync.Prefs.set('lastWarnings', this._formatWarnings(result.warnings));
@@ -333,7 +340,9 @@ ZoteroGitHubSync.Sync = {
 			}
 			this.lastResult = result;
 			this.progress = null;
-			this._setStatus('idle');
+			this.pendingReview = result.pending || 0;
+			ZoteroGitHubSync.Prefs.set('pendingReview', this.pendingReview);
+			this._setStatus(this.pendingReview ? 'attention' : 'idle');
 
 			let summary = result.status === 'up-to-date'
 				? ZoteroGitHubSync.getString('progress.upToDate')
@@ -342,8 +351,19 @@ ZoteroGitHubSync.Sync = {
 					String(result.added + result.updated + result.deleted),
 					`${config.owner}/${config.repo}`
 				);
-			if (result.warnings?.length) {
+			if (result.pending) {
+				summary += `\n${ZoteroGitHubSync.getString('review.pendingSummary', String(result.pending))}`;
+			}
+			else if (result.warnings?.length) {
 				summary += `\n${ZoteroGitHubSync.getString('progress.warnings', String(result.warnings.length))}`;
+			}
+			if (silent && result.pending && !this._pendingNotified) {
+				// Say it once, not after every background sync
+				this._pendingNotified = true;
+				this._notify(ZoteroGitHubSync.getString('review.pendingSummary', String(result.pending)));
+			}
+			if (!result.pending) {
+				this._pendingNotified = false;
 			}
 			this._finishProgressWindow(summary);
 			return result;
@@ -393,11 +413,15 @@ ZoteroGitHubSync.Sync = {
 	},
 
 
-	async _runSync({ config, token, items, trigger }) {
+	async _runSync({ config, token, items, trigger, silent = false, forceReview = false, preset = null }) {
 		let prefix = config.basePath ? `${config.basePath}/` : '';
 		let Files = ZoteroGitHubSync.Files;
 		let Utils = ZoteroGitHubSync.Utils;
+		let Planner = ZoteroGitHubSync.Planner;
 		let cancel = this._cancel;
+		let get = (key, ...args) => ZoteroGitHubSync.getString(key, ...args);
+
+		// -- 1. Analyse: export, read the branch, compare three ways ------------
 
 		let { files, keepPrefixes, warnings } = await ZoteroGitHubSync.Exporter.build({
 			config,
@@ -418,7 +442,7 @@ ZoteroGitHubSync.Sync = {
 
 		await this._ensureRepo(client, config);
 
-		this._updateProgress({ phase: 'collecting', message: ZoteroGitHubSync.getString('progress.comparing') });
+		this._updateProgress({ phase: 'collecting', message: get('progress.comparing') });
 		let head = await this._resolveHead(client, config);
 		let branchExists = !!head;
 		let baseTreeSha = null;
@@ -428,62 +452,54 @@ ZoteroGitHubSync.Sync = {
 			baseTreeSha = commit.tree.sha;
 			remoteFiles = await client.listTree(baseTreeSha);
 		}
+		let remote = new Map();
+		for (let [fullPath, entry] of remoteFiles) {
+			if (fullPath.startsWith(prefix)) {
+				remote.set(fullPath.slice(prefix.length), entry.sha);
+			}
+		}
 
 		// Attachments whose files exist in the library but not on this computer:
 		// whatever an earlier sync uploaded for them stays, untouched
 		let kept = new Set();
 		if (keepPrefixes.length) {
-			for (let fullPath of remoteFiles.keys()) {
-				if (!fullPath.startsWith(prefix)) {
-					continue;
-				}
-				let relPath = fullPath.slice(prefix.length);
+			for (let relPath of remote.keys()) {
 				if (!files.has(relPath) && keepPrefixes.some(p => relPath.startsWith(p))) {
 					kept.add(relPath);
 				}
 			}
 		}
 
-		// The path list is what makes pruning safe, so it is only written (and
-		// only trusted) on a full sync. It goes in the final commit, after
-		// everything it lists.
 		let isFullSync = !items;
-		let fileList = null;
+		let previousManaged = isFullSync ? await this._readPreviousFileList(client, remoteFiles, prefix) : [];
 		if (isFullSync) {
 			let managed = [...new Set([...files.keys(), ...kept])].sort();
-			fileList = {
-				fullPath: prefix + this.FILE_LIST_PATH,
+			files.set(this.FILE_LIST_PATH, {
 				bytes: Utils.encode(ZoteroGitHubSync.Exporter.stableStringify(managed) + '\n'),
-			};
+			});
 		}
 
-		// What changed. Attachment files are hashed from disk, or taken from the
-		// hash cache when their size and modification time haven't moved.
-		let texts = [];
-		let blobs = [];
-		let lfsObjects = [];
-		let reused = [];
-		let updatedCount = 0;
+		// Hash what the export produced. Attachment files come from the hash
+		// cache when their size and modification time haven't moved.
+		let local = new Map();
+		let uploads = new Map();
 		let sourceCount = [...files.values()].filter(f => f.source).length;
 		let hashed = 0;
-		let remoteShas = new Set([...remoteFiles.values()].map(entry => entry.sha));
-
 		this._updateProgress({ phase: 'hashing', done: 0, total: sourceCount, bytesDone: 0, bytesTotal: 0 });
 		await Files.loadCache();
 		try {
-			let check = async (fullPath, file) => {
-				let sha;
-				let upload = { fullPath };
+			for (let [relPath, file] of files) {
+				let upload = { fullPath: prefix + relPath, relPath };
 				if (file.source) {
 					cancel.throwIfCancelled();
 					if (file.lfs) {
 						let oid = await Files.cachedHash(file.source, 'lfs');
 						upload.bytes = Utils.encode(Utils.lfsPointer(oid, file.source.size));
 						upload.lfs = { oid, size: file.source.size, path: file.source.path };
-						sha = await Utils.gitBlobSha(upload.bytes);
+						upload.sha = await Utils.gitBlobSha(upload.bytes);
 					}
 					else {
-						sha = await Files.cachedHash(file.source, 'git');
+						upload.sha = await Files.cachedHash(file.source, 'git');
 						upload.source = file.source;
 					}
 					hashed++;
@@ -493,48 +509,10 @@ ZoteroGitHubSync.Sync = {
 				}
 				else {
 					upload.bytes = file.bytes;
-					sha = await Utils.gitBlobSha(file.bytes);
+					upload.sha = await Utils.gitBlobSha(file.bytes);
 				}
-				upload.sha = sha;
-
-				let remote = remoteFiles.get(fullPath);
-				if (remote?.sha === sha) {
-					return;
-				}
-				if (remote) {
-					updatedCount++;
-				}
-				if (remoteShas.has(sha)) {
-					// Same content already in the repository under another path
-					// (a renamed note, a moved attachment): no need to send it again
-					reused.push({ path: fullPath, sha });
-					return;
-				}
-				if (upload.lfs) {
-					lfsObjects.push(upload.lfs);
-				}
-				if (upload.bytes && upload.bytes.length <= this.INLINE_MAX_BYTES) {
-					texts.push(upload);
-				}
-				else {
-					blobs.push(upload);
-				}
-			};
-			for (let [relPath, file] of files) {
-				await check(prefix + relPath, file);
-			}
-			if (fileList) {
-				// Checked like any file, but held back for the final commit
-				let before = texts.length + blobs.length + reused.length;
-				await check(fileList.fullPath, fileList);
-				let changed = texts.length + blobs.length + reused.length > before;
-				fileList.changed = changed;
-				if (changed) {
-					texts = texts.filter(t => t.fullPath !== fileList.fullPath);
-					blobs = blobs.filter(b => b.fullPath !== fileList.fullPath);
-					reused = reused.filter(r => r.path !== fileList.fullPath);
-					fileList.sha = await Utils.gitBlobSha(fileList.bytes);
-				}
+				local.set(relPath, upload.sha);
+				uploads.set(relPath, upload);
 			}
 			if (isFullSync) {
 				Files.retainCache(new Set(
@@ -546,26 +524,143 @@ ZoteroGitHubSync.Sync = {
 			await Files.saveCache();
 		}
 
-		// What went away
-		let deletions = [];
-		if (isFullSync && config.prune) {
-			let previous = await this._readPreviousFileList(client, remoteFiles, prefix);
-			for (let relPath of previous) {
-				if (files.has(relPath) || kept.has(relPath)) {
-					continue;
+		let state = await ZoteroGitHubSync.State.load(config);
+		let base = state?.base || null;
+		if (!base && head && head === ZoteroGitHubSync.Prefs.get('lastCommit')) {
+			// Upgrading from 0.2, which kept no base: this computer made the
+			// branch's latest commit, so the branch is what it last synced
+			base = new Map(remote);
+		}
+		let managed = previousManaged.length ? new Set([...previousManaged, this.FILE_LIST_PATH]) : null;
+		let plan = Planner.plan({ local, remote, base, kept, fullSync: isFullSync, managed });
+		await this._resolveDiverged({ plan, client, remoteFiles, prefix, uploads });
+
+		// -- 2. Decide ---------------------------------------------------------
+
+		let decisions = preset;
+		let pending = 0;
+		if (!decisions) {
+			let needsReview = Planner.needsReview(plan);
+			if (needsReview && silent) {
+				// Nobody is watching: do what is safe, leave the rest for a review
+				decisions = this._emptyDecisions();
+			}
+			else if (needsReview || forceReview) {
+				this._updateProgress({ phase: 'collecting', message: get('review.preparing') });
+				let review = await this._prepareReview({ plan, client, remoteFiles, prefix, uploads, remote, config });
+				decisions = await ZoteroGitHubSync.Review.ask(review);
+				if (!decisions) {
+					throw new ZoteroGitHubSync.CancelledError();
 				}
-				let fullPath = prefix + relPath;
-				if (remoteFiles.has(fullPath)) {
-					deletions.push(fullPath);
+			}
+			else {
+				decisions = this._emptyDecisions();
+			}
+
+			// Accepted changes from the server go into Zotero first; the library
+			// then exports again, carrying the same decisions
+			if (decisions.importPaths.size) {
+				this._updateProgress({ phase: 'importing', message: get('review.importing', String(decisions.importPaths.size)) });
+				this._suppressChangeTrigger = true;
+				try {
+					let result = await ZoteroGitHubSync.Importer.applyIncoming({
+						client,
+						config,
+						token,
+						remoteFiles,
+						relPaths: decisions.importPaths,
+						keepBoth: decisions.keepBoth,
+						cancel,
+						onProgress: message => this._updateProgress({ phase: 'importing', message }),
+					});
+					warnings.push(...result.failures);
 				}
+				finally {
+					this._suppressChangeTrigger = false;
+				}
+				return this._runSync({ config, token, items, trigger, silent, preset: decisions });
 			}
 		}
 
-		let changedFiles = texts.length + blobs.length + reused.length + (fileList?.changed ? 1 : 0);
-		if (!changedFiles && !deletions.length) {
-			return { status: 'up-to-date', added: 0, updated: 0, deleted: 0, commit: null, warnings };
+		// -- 3. Act ------------------------------------------------------------
+
+		let push = new Set(plan.push);
+		for (let path of [...plan.conflicts, ...plan.overwrite, ...plan.restore, ...plan.diverged, ...plan.incoming]) {
+			// Chosen in the review, or already imported and still different
+			// (the export writes it slightly differently): Zotero's copy wins
+			if (decisions.pushPaths.has(path) || decisions.importPaths.has(path)) {
+				push.add(path);
+			}
 		}
-		let addedCount = texts.length + blobs.length + reused.length - updatedCount;
+		let deletions = plan.delete.filter(path => !decisions.excluded.has(path));
+		for (let path of decisions.excluded) {
+			push.delete(path);
+		}
+		for (let path of [...push]) {
+			if (!uploads.has(path)) {
+				push.delete(path);
+			}
+		}
+		let undecided = new Set(decisions.excluded);
+		for (let path of [...plan.incoming, ...plan.conflicts, ...plan.overwrite, ...plan.restore, ...plan.diverged]) {
+			if (!push.has(path) && !decisions.importPaths.has(path)) {
+				undecided.add(path);
+				pending++;
+			}
+		}
+		if (pending) {
+			warnings.push(get('review.pendingWarning', String(pending)));
+		}
+
+		let texts = [];
+		let blobs = [];
+		let lfsObjects = [];
+		let reused = [];
+		let updatedCount = 0;
+		let remoteShas = new Set([...remoteFiles.values()].map(entry => entry.sha));
+		for (let relPath of [...push].sort()) {
+			let upload = uploads.get(relPath);
+			if (remote.has(relPath)) {
+				updatedCount++;
+			}
+			if (remoteShas.has(upload.sha)) {
+				// Same content already in the repository under another path
+				reused.push({ path: upload.fullPath, sha: upload.sha });
+				continue;
+			}
+			if (upload.lfs) {
+				lfsObjects.push(upload.lfs);
+			}
+			if (upload.bytes && upload.bytes.length <= this.INLINE_MAX_BYTES) {
+				texts.push(upload);
+			}
+			else {
+				blobs.push(upload);
+			}
+		}
+		let addedCount = push.size - updatedCount;
+
+		let saveState = async (commitSha, after) => {
+			if (!isFullSync && !base) {
+				// A partial sync can't vouch for paths it didn't export
+				return;
+			}
+			let nextBase = Planner.nextBase({ local, remote: after, base, undecided, kept });
+			if (!isFullSync && base) {
+				// Keep what the partial sync didn't look at
+				for (let [path, sha] of base) {
+					if (!local.has(path) && !nextBase.has(path)) {
+						nextBase.set(path, sha);
+					}
+				}
+			}
+			await ZoteroGitHubSync.State.save(config, { commit: commitSha, base: nextBase });
+		};
+
+		if (!push.size && !deletions.length) {
+			await saveState(head, remote);
+			return { status: 'up-to-date', added: 0, updated: 0, deleted: 0, commit: null, pending, warnings };
+		}
 
 		// LFS objects go up before any pointer is committed, so the branch never
 		// references a file LFS doesn't have
@@ -596,7 +691,7 @@ ZoteroGitHubSync.Sync = {
 		showUpload();
 
 		let treeSha = baseTreeSha;
-		let pending = [];
+		let pendingEntries = [];
 		let pendingBytes = 0;
 		let lastCheckpoint = Date.now();
 		let commitSha = null;
@@ -604,11 +699,11 @@ ZoteroGitHubSync.Sync = {
 
 		// Build trees from pending entries, commit, and move the branch
 		let commit = async (message) => {
-			if (!pending.length) {
+			if (!pendingEntries.length) {
 				return;
 			}
 			this._updateProgress({ phase: 'committing' });
-			for (let chunk of this._chunkEntries(pending)) {
+			for (let chunk of this._chunkEntries(pendingEntries)) {
 				treeSha = await client.createTree(chunk, treeSha);
 			}
 			commitSha = await client.createCommit({
@@ -635,7 +730,7 @@ ZoteroGitHubSync.Sync = {
 				throw e;
 			}
 			head = commitSha;
-			pending = [];
+			pendingEntries = [];
 			pendingBytes = 0;
 			lastCheckpoint = Date.now();
 			showUpload();
@@ -649,7 +744,7 @@ ZoteroGitHubSync.Sync = {
 		// Text first: the whole library's metadata and notes become visible on
 		// GitHub within a minute, before any PDF has gone up
 		for (let upload of texts) {
-			pending.push({
+			pendingEntries.push({
 				path: upload.fullPath,
 				mode: '100644',
 				type: 'blob',
@@ -658,11 +753,11 @@ ZoteroGitHubSync.Sync = {
 			});
 		}
 		for (let entry of reused) {
-			pending.push({ path: entry.path, mode: '100644', type: 'blob', sha: entry.sha });
+			pendingEntries.push({ path: entry.path, mode: '100644', type: 'blob', sha: entry.sha });
 		}
 		doneFiles += texts.length + reused.length;
 		doneBytes += texts.reduce((sum, u) => sum + size(u), 0);
-		if (blobs.length && pending.length > this.TREE_MAX_ENTRIES) {
+		if (blobs.length && pendingEntries.length > this.TREE_MAX_ENTRIES) {
 			await commit(checkpointMessage());
 		}
 		else {
@@ -686,15 +781,15 @@ ZoteroGitHubSync.Sync = {
 			if (sha !== upload.sha) {
 				throw new Error(`Upload of ${upload.fullPath} arrived corrupted (expected ${upload.sha}, got ${sha})`);
 			}
-			pending.push({ path: upload.fullPath, mode: '100644', type: 'blob', sha });
+			pendingEntries.push({ path: upload.fullPath, mode: '100644', type: 'blob', sha });
 			pendingBytes += size(upload);
 			doneFiles++;
 			doneBytes += size(upload);
 			showUpload();
 		};
 		let dueForCheckpoint = () => pendingBytes >= this.CHECKPOINT_BYTES
-			|| pending.length >= this.CHECKPOINT_FILES
-			|| (pending.length && Date.now() - lastCheckpoint >= this.CHECKPOINT_MS);
+			|| pendingEntries.length >= this.CHECKPOINT_FILES
+			|| (pendingEntries.length && Date.now() - lastCheckpoint >= this.CHECKPOINT_MS);
 
 		let small = blobs.filter(u => size(u) < this.LARGE_BLOB_BYTES);
 		let large = blobs.filter(u => size(u) >= this.LARGE_BLOB_BYTES);
@@ -711,19 +806,10 @@ ZoteroGitHubSync.Sync = {
 			}
 		}
 
-		// Final commit: whatever is left, the file list, and the deletions
+		// Final commit: whatever is left, and the deletions
 		cancel.throwIfCancelled();
-		if (fileList?.changed) {
-			pending.push({
-				path: fileList.fullPath,
-				mode: '100644',
-				type: 'blob',
-				content: Utils.textDecoder.decode(fileList.bytes),
-				size: fileList.bytes.length,
-			});
-		}
-		for (let path of deletions) {
-			pending.push({ path, mode: '100644', type: 'blob', sha: null });
+		for (let relPath of deletions) {
+			pendingEntries.push({ path: prefix + relPath, mode: '100644', type: 'blob', sha: null });
 		}
 		await commit(this._commitMessage({
 			config,
@@ -733,6 +819,15 @@ ZoteroGitHubSync.Sync = {
 			deleted: deletions.length,
 		}));
 
+		let after = new Map(remote);
+		for (let relPath of push) {
+			after.set(relPath, uploads.get(relPath).sha);
+		}
+		for (let relPath of deletions) {
+			after.delete(relPath);
+		}
+		await saveState(commitSha, after);
+
 		return {
 			status: 'committed',
 			added: addedCount,
@@ -740,8 +835,199 @@ ZoteroGitHubSync.Sync = {
 			deleted: deletions.length,
 			commit: commitSha,
 			checkpoints,
+			pending,
 			warnings,
 		};
+	},
+
+
+	/**
+	 * Everything the review panel shows: titles instead of bare keys, and what
+	 * each side holds.
+	 */
+	async _prepareReview({ plan, client, remoteFiles, prefix, uploads, remote, config }) {
+		let Planner = ZoteroGitHubSync.Planner;
+		let get = (key, ...args) => ZoteroGitHubSync.getString(key, ...args);
+		let parse = (bytes) => {
+			try {
+				return JSON.parse(ZoteroGitHubSync.Utils.textDecoder.decode(bytes));
+			}
+			catch (e) {
+				return null;
+			}
+		};
+
+		// Titles and attachment ownership from the local export
+		let titles = new Map();
+		let attachmentOwner = new Map();
+		let learn = (record) => {
+			if (!record?.zotero?.key) {
+				return;
+			}
+			titles.set(record.zotero.key, record.meta?.title || record.zotero.title || record.zotero.key);
+			for (let attachment of record.meta?.attachments || []) {
+				attachmentOwner.set(attachment.key, { title: record.meta?.title, filename: attachment.filename });
+			}
+		};
+		for (let [relPath, upload] of uploads) {
+			if (Planner.importable(relPath)?.kind === 'item' && upload.bytes) {
+				learn(parse(upload.bytes));
+			}
+		}
+
+		// Remote records for items that changed on the server: their titles and
+		// modification dates. Capped, so a first review of a large repository
+		// doesn't wait on thousands of downloads.
+		const MAX_FETCH = 400;
+		let remoteRecords = new Map();
+		let wanted = [...plan.incoming, ...plan.conflicts]
+			.filter(path => Planner.importable(path)?.kind === 'item')
+			.slice(0, MAX_FETCH);
+		await ZoteroGitHubSync.Utils.pMap(wanted, async (relPath) => {
+			try {
+				let record = JSON.parse(await client.getBlobText(remoteFiles.get(prefix + relPath).sha));
+				remoteRecords.set(relPath, record);
+				if (!titles.has(record?.zotero?.key)) {
+					learn(record);
+				}
+			}
+			catch (e) {
+				ZoteroGitHubSync.logError(e);
+			}
+		}, 5);
+
+		let date = value => (value ? String(value).replace('T', ' ').replace(/Z$/, '') : '?');
+		let describe = (relPath) => {
+			let info = Planner.importable(relPath);
+			if (info?.kind === 'item') {
+				return { title: titles.get(info.key) || info.key, kind: 'item' };
+			}
+			if (info?.kind === 'file') {
+				let owner = attachmentOwner.get(info.key);
+				return {
+					title: owner?.title ? `${owner.title} — ${info.name}` : info.name,
+					kind: 'file',
+				};
+			}
+			if (info?.kind === 'library') {
+				return { title: get(`review.library.${info.name}`), kind: 'library' };
+			}
+			let note = relPath.match(/\/notes\/[^/]+\/(.+) \(([A-Z0-9]{8})\)\.md$/);
+			if (note) {
+				return { title: `${note[1]} (${get('review.markdown')})`, kind: 'derived' };
+			}
+			return { title: relPath.split('/').pop(), kind: 'derived' };
+		};
+
+		let row = relPath => ({ path: relPath, ...describe(relPath) });
+
+		let incoming = plan.incoming.map((relPath) => {
+			let r = row(relPath);
+			r.detail = get(uploads.has(relPath) ? 'review.changedOnServer' : 'review.addedOnServer');
+			return r;
+		});
+
+		let conflicts = plan.conflicts.map((relPath) => {
+			let r = row(relPath);
+			if (r.kind === 'item') {
+				let localDate = this._recordDate(parse(uploads.get(relPath)?.bytes));
+				let remoteDate = this._recordDate(remoteRecords.get(relPath));
+				r.detail = get('review.dates', date(localDate), date(remoteDate));
+				r.options = ['local', 'server'];
+				r.choice = remoteDate > localDate ? 'server' : 'local';
+			}
+			else if (r.kind === 'file') {
+				r.detail = get('review.fileDiffers');
+				r.options = ['local', 'server', 'both'];
+				r.choice = 'both';
+			}
+			else {
+				r.detail = get('review.libraryDiffers');
+				r.options = ['local', 'server'];
+				// "Server" for a library file merges the repository's entries in
+				r.choice = 'server';
+			}
+			return r;
+		});
+
+		let push = new Set(plan.push);
+		let server = [
+			...[...push].filter(relPath => remote.has(relPath)).map(relPath => ({ ...row(relPath), action: 'update' })),
+			...plan.delete.map(relPath => ({ ...row(relPath), action: 'delete' })),
+		];
+
+		return {
+			repo: `${config.owner}/${config.repo}`,
+			counts: {
+				add: [...push].filter(relPath => !remote.has(relPath)).length,
+				update: server.filter(r => r.action === 'update').length,
+				delete: plan.delete.length,
+			},
+			incoming,
+			conflicts,
+			overwrite: plan.overwrite.map(relPath => ({ ...row(relPath), detail: get('review.editedOnServer') })),
+			restore: plan.restore.map(relPath => ({ ...row(relPath), detail: get('review.deletedOnServer') })),
+			server,
+		};
+	},
+
+
+	_emptyDecisions() {
+		return { importPaths: new Set(), pushPaths: new Set(), keepBoth: new Set(), excluded: new Set() };
+	},
+
+
+	/**
+	 * Paths both sides have, that differ, and that this computer has never synced
+	 * before. For items the modification date usually says which side is newer;
+	 * whatever can't be told apart becomes a conflict.
+	 */
+	async _resolveDiverged({ plan, client, remoteFiles, prefix, uploads }) {
+		if (!plan.diverged.length) {
+			return;
+		}
+		let Planner = ZoteroGitHubSync.Planner;
+		let remaining = [];
+		await ZoteroGitHubSync.Utils.pMap(plan.diverged, async (relPath) => {
+			if (Planner.importable(relPath)?.kind !== 'item') {
+				remaining.push(relPath);
+				return;
+			}
+			try {
+				let localDate = this._recordDate(JSON.parse(ZoteroGitHubSync.Utils.textDecoder.decode(uploads.get(relPath).bytes)));
+				let remoteDate = this._recordDate(JSON.parse(await client.getBlobText(remoteFiles.get(prefix + relPath).sha)));
+				if (remoteDate > localDate) {
+					plan.incoming.push(relPath);
+				}
+				else if (localDate > remoteDate) {
+					plan.push.push(relPath);
+				}
+				else {
+					plan.conflicts.push(relPath);
+				}
+			}
+			catch (e) {
+				ZoteroGitHubSync.logError(e);
+				plan.conflicts.push(relPath);
+			}
+		}, 5);
+		plan.conflicts.push(...remaining);
+		plan.diverged = [];
+		for (let key of ['incoming', 'push', 'conflicts']) {
+			plan[key].sort();
+		}
+	},
+
+
+	/**
+	 * @return {String} The latest dateModified in an item record, children included
+	 */
+	_recordDate(record) {
+		let dates = [record?.zotero, ...(record?.children || [])]
+			.map(json => json?.dateModified || '')
+			.filter(Boolean)
+			.sort();
+		return dates.length ? dates[dates.length - 1] : '';
 	},
 
 

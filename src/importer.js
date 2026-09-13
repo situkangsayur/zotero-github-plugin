@@ -44,9 +44,41 @@ ZoteroGitHubSync.Importer = {
 				'No Zotero data found in the repository. Check the base path setting.'
 			);
 		}
+		return this._importGroups({ client, config, token, libraries, cancel, onProgress });
+	},
 
+
+	/**
+	 * Import only the repository paths a person accepted in the review: changes
+	 * made on GitHub or by another computer, and conflicts resolved in favour of
+	 * the repository. Items are updated even when the local copy is newer, and
+	 * files are overwritten, because that is what was chosen.
+	 *
+	 * @param {Object} options
+	 * @param {ZoteroGitHubSync.GitHub} options.client
+	 * @param {Map<String, Object>} options.remoteFiles - The whole remote tree
+	 * @param {Iterable<String>} options.relPaths - Accepted paths, relative to the base path
+	 * @param {Set<String>} [options.keepBoth] - File paths to add as a second attachment
+	 * 		instead of replacing the local file
+	 * @return {Promise<Object>} Totals, as run()
+	 */
+	async applyIncoming({ client, config, token, remoteFiles, relPaths, keepBoth = new Set(), cancel = null, onProgress = () => {} }) {
+		let prefix = config.basePath ? `${config.basePath}/` : '';
+		let wanted = new Set([...relPaths].map(p => prefix + p));
+		let subset = new Map([...remoteFiles].filter(([path]) => wanted.has(path)));
+		let libraries = this.groupByLibrary(subset, config, { keepEmpty: true });
+		return this._importGroups({
+			client, config, token, libraries, cancel, onProgress,
+			force: true,
+			overwriteFiles: true,
+			keepBoth,
+		});
+	},
+
+
+	async _importGroups({ client, config, token, libraries, cancel, onProgress, force = false, overwriteFiles = false, keepBoth = new Set() }) {
 		let totals = { status: 'ok', created: 0, updated: 0, skipped: 0, files: 0, failures: [] };
-		let ctx = { client, config, token, head, totals, onProgress, lfs: null };
+		let ctx = { client, config, token, totals, onProgress, lfs: null };
 
 		for (let [dir, group] of libraries) {
 			cancel?.throwIfCancelled();
@@ -67,15 +99,17 @@ ZoteroGitHubSync.Importer = {
 				await this._importCollections({ client, entry: group.collections, libraryID });
 			}
 
-			let records = await this._fetchItemRecords({ client, entries: group.items, onProgress });
-			let result = await this._importItems({ records, libraryID, group, onProgress });
-			totals.created += result.created;
-			totals.updated += result.updated;
-			totals.skipped += result.skipped;
+			if (group.items.length) {
+				let records = await this._fetchItemRecords({ client, entries: group.items, onProgress });
+				let result = await this._importItems({ records, libraryID, group, onProgress, force });
+				totals.created += result.created;
+				totals.updated += result.updated;
+				totals.skipped += result.skipped;
+			}
 
-			if (config.includeAttachments && group.files.size) {
+			if ((config.includeAttachments || overwriteFiles) && group.files.size) {
 				onProgress(ZoteroGitHubSync.getString('progress.restoring'));
-				totals.files += await this._restoreFiles({ ctx, group, libraryID });
+				totals.files += await this._restoreFiles({ ctx, group, libraryID, overwrite: overwriteFiles, keepBoth });
 			}
 
 			if (group.searches) {
@@ -100,7 +134,7 @@ ZoteroGitHubSync.Importer = {
 	 * 		files: Map<attachmentKey, [{ name, sha, size, lfs }]>
 	 * 	}
 	 */
-	groupByLibrary(remoteFiles, config) {
+	groupByLibrary(remoteFiles, config, { keepEmpty = false } = {}) {
 		let prefix = config.basePath ? `${config.basePath}/` : '';
 		let libraries = new Map();
 
@@ -141,6 +175,7 @@ ZoteroGitHubSync.Importer = {
 					files.set(fileMatch[3], []);
 				}
 				files.get(fileMatch[3]).push({
+					path: rel,
 					name: fileMatch[4],
 					sha: entry.sha,
 					size: entry.size,
@@ -149,10 +184,13 @@ ZoteroGitHubSync.Importer = {
 			}
 		}
 
-		// Directories with no items aren't libraries
-		for (let [dir, data] of [...libraries]) {
-			if (!data.items.length) {
-				libraries.delete(dir);
+		// Directories with no items aren't libraries -- unless this is a subset
+		// of paths chosen in a review, which may hold only files or settings
+		if (!keepEmpty) {
+			for (let [dir, data] of [...libraries]) {
+				if (!data.items.length) {
+					libraries.delete(dir);
+				}
 			}
 		}
 		return libraries;
@@ -304,7 +342,7 @@ ZoteroGitHubSync.Importer = {
 	},
 
 
-	async _importItems({ records, libraryID, group, onProgress }) {
+	async _importItems({ records, libraryID, group, onProgress, force = false }) {
 		let created = 0;
 		let updated = 0;
 		let skipped = 0;
@@ -314,12 +352,14 @@ ZoteroGitHubSync.Importer = {
 			try {
 				let existing = Zotero.Items.getByLibraryAndKey(libraryID, json.key);
 				if (existing) {
-					if (!this._remoteIsNewer(json, existing)) {
+					if (!force && !this._remoteIsNewer(json, existing)) {
 						skipped++;
 						continue;
 					}
 					existing.fromJSON(this._prepareJSON(json, libraryID, group));
-					await existing.saveTx({ skipSelect: true });
+					// Keep the repository's modification date, so exporting the item
+					// again produces the same file instead of a new commit
+					await existing.saveTx({ skipSelect: true, skipDateModifiedUpdate: true });
 					updated++;
 				}
 				else {
@@ -328,7 +368,7 @@ ZoteroGitHubSync.Importer = {
 					item.key = json.key;
 					await item.loadPrimaryData();
 					item.fromJSON(this._prepareJSON(json, libraryID, group, { isNew: true }));
-					await item.saveTx({ skipSelect: true, skipCache: true });
+					await item.saveTx({ skipSelect: true, skipCache: true, skipDateModifiedUpdate: true });
 					created++;
 				}
 			}
@@ -442,48 +482,71 @@ ZoteroGitHubSync.Importer = {
 	 *
 	 * @return {Promise<Number>} Files written
 	 */
-	async _restoreFiles({ ctx, group, libraryID }) {
+	async _restoreFiles({ ctx, group, libraryID, overwrite = false, keepBoth = new Set() }) {
 		let { client, config, totals } = ctx;
 		let written = 0;
 		let lfsTargets = [];
+		let copies = [];
 
 		for (let [key, entries] of group.files) {
 			let attachment = Zotero.Items.getByLibraryAndKey(libraryID, key);
 			if (!attachment || !attachment.isFileAttachment()) {
 				continue;
 			}
-			if (attachment.isLinkedFileAttachment()) {
+			if (attachment.isLinkedFileAttachment() && !keepBoth.size) {
 				// A linked file that resolves here is the user's own copy
 				continue;
 			}
 			let storageDir = Zotero.Attachments.getStorageDirectory(attachment).path;
 
 			for (let entry of entries) {
-				let target = PathUtils.join(storageDir, ...entry.name.split('/'));
+				let label = `${key}/${entry.name}`;
+				let both = keepBoth.has(entry.path);
+				let target = both
+					? PathUtils.join(Zotero.getTempDirectory().path, `zgs-copy-${key}`, ...entry.name.split('/'))
+					: PathUtils.join(storageDir, ...entry.name.split('/'));
 				try {
-					if (!entry.lfs) {
-						let stat = await ZoteroGitHubSync.Files.statFile(target);
-						if (stat && stat.size === entry.size) {
+					let pointer = null;
+					let size = entry.size;
+					if (entry.lfs) {
+						// The tree holds a pointer; read it for the object ID
+						pointer = ZoteroGitHubSync.Utils.parseLFSPointer(await client.getBlobText(entry.sha));
+						if (!pointer) {
+							totals.failures.push(`${label}: not a valid Git LFS pointer`);
 							continue;
 						}
+						size = pointer.size;
+					}
+					if (!both) {
+						let stat = await ZoteroGitHubSync.Files.statFile(target);
+						if (stat && stat.size === size && !overwrite) {
+							continue;
+						}
+						if (stat && !overwrite) {
+							// Never replace a file that differs from the repository copy
+							// unless someone chose the repository's version
+							totals.failures.push(
+								`${label}: kept the file on this computer; the repository copy differs `
+								+ '(choose it in Review sync changes to replace it)'
+							);
+							continue;
+						}
+					}
+					if (both) {
+						copies.push({ attachment, target, name: entry.name });
+					}
+					if (pointer) {
+						lfsTargets.push({ ...pointer, path: target, label });
+					}
+					else {
 						await client.downloadBlob(entry.sha, target);
-						written++;
-						continue;
+						if (!both) {
+							written++;
+						}
 					}
-					// LFS: the tree holds a pointer; read it for the object ID
-					let pointer = ZoteroGitHubSync.Utils.parseLFSPointer(await client.getBlobText(entry.sha));
-					if (!pointer) {
-						totals.failures.push(`${key}/${entry.name}: not a valid Git LFS pointer`);
-						continue;
-					}
-					let stat = await ZoteroGitHubSync.Files.statFile(target);
-					if (stat && stat.size === pointer.size) {
-						continue;
-					}
-					lfsTargets.push({ ...pointer, path: target, label: `${key}/${entry.name}` });
 				}
 				catch (e) {
-					totals.failures.push(`${key}/${entry.name}: ${e.message || e}`);
+					totals.failures.push(`${label}: ${e.message || e}`);
 				}
 			}
 		}
@@ -493,9 +556,38 @@ ZoteroGitHubSync.Importer = {
 				ctx.lfs = await ZoteroGitHubSync.Sync._lfsClient(client, config, ctx.token);
 			}
 			let failed = await ctx.lfs.downloadAll(lfsTargets, { ref: `refs/heads/${config.branch}` });
-			written += lfsTargets.length - failed.length;
+			let failedPaths = new Set(failed.map(f => f.path));
+			written += lfsTargets.filter(t => !failedPaths.has(t.path) && !copies.some(c => c.target === t.path)).length;
 			for (let failure of failed) {
 				totals.failures.push(`${failure.label}: ${failure.error}`);
+			}
+			copies = copies.filter(c => !failedPaths.has(c.target));
+		}
+
+		// "Keep both": the repository's version becomes a second attachment next
+		// to the local one, so nothing is lost and both get synced
+		for (let copy of copies) {
+			try {
+				let parentItemID = copy.attachment.parentID || null;
+				let dot = copy.name.lastIndexOf('.');
+				let base = dot > 0 ? copy.name.slice(0, dot) : copy.name;
+				let ext = dot > 0 ? copy.name.slice(dot) : '';
+				let renamed = PathUtils.join(PathUtils.parent(copy.target), `${base} (GitHub copy)${ext}`);
+				await IOUtils.move(copy.target, renamed);
+				let imported = await Zotero.Attachments.importFromFile({
+					file: renamed,
+					parentItemID,
+					libraryID: parentItemID ? undefined : copy.attachment.libraryID,
+					collections: parentItemID ? undefined : copy.attachment.getCollections(),
+					title: `${copy.attachment.getField('title') || base} (GitHub copy)`,
+				});
+				if (imported) {
+					written++;
+				}
+				await IOUtils.remove(PathUtils.parent(renamed), { recursive: true, ignoreAbsent: true });
+			}
+			catch (e) {
+				totals.failures.push(`${copy.attachment.key}/${copy.name}: could not keep the GitHub copy: ${e.message || e}`);
 			}
 		}
 		return written;

@@ -88,6 +88,11 @@ ZoteroGitHubSync.GitHub = class GitHubClient {
 			Accept: raw ? 'application/vnd.github.raw+json' : 'application/vnd.github+json',
 			'X-GitHub-Api-Version': '2022-11-28',
 			Authorization: `Bearer ${this.token}`,
+			// GitHub marks responses cacheable for 60 seconds. A branch head read
+			// from the cache right after a commit -- ours or another computer's --
+			// builds the next commit on a stale parent, which GitHub then refuses.
+			'Cache-Control': 'no-cache',
+			Pragma: 'no-cache',
 		};
 		let payload;
 		if (rawBody !== undefined) {

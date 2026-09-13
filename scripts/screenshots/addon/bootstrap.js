@@ -268,6 +268,42 @@ async function run(outDir) {
 	prefs.set('lastError', '');
 	plugin.Sync._setStatus('idle');
 
+	// 3a. Changes waiting for a review
+	plugin.Sync.pendingReview = 3;
+	plugin.Sync._setStatus('attention');
+	await sleep(500);
+	await capture(win, PathUtils.join(outDir, '04b-attention-main.png'));
+	plugin.Sync.pendingReview = 0;
+	plugin.Sync._setStatus('idle');
+
+	// 3b. Review panel, with representative rows (nothing is synced)
+	let reviewPromise = plugin.Review.ask({
+		repo: 'your-github-username/zotero-library',
+		counts: { add: 3, update: 2, delete: 1 },
+		incoming: [
+			{ path: 'my-library/items/7Q/7QK2M4PA.json', title: 'Deep Residual Learning for Image Recognition', detail: 'changed on GitHub' },
+			{ path: 'my-library/items/9X/9XRT2LBN.json', title: 'Mask R-CNN', detail: 'only on GitHub' },
+			{ path: 'my-library/attachments/9X/9XRT2LBN/he-2017.pdf', title: 'Mask R-CNN — he-2017.pdf', detail: 'only on GitHub' },
+		],
+		conflicts: [
+			{ path: 'my-library/items/AB/ABCD1234.json', title: 'Attention Is All You Need', detail: 'modified in Zotero 2026-09-12 08:14:02 · on GitHub 2026-09-13 06:40:11', options: ['local', 'server'], choice: 'server' },
+			{ path: 'my-library/attachments/WX/WXYZ5678/vaswani-2017.pdf', title: 'Attention Is All You Need — vaswani-2017.pdf', detail: 'the file differs', options: ['local', 'server', 'both'], choice: 'both' },
+		],
+		overwrite: [
+			{ path: 'my-library/notes/D/Deep Learning (QWER5678).md', title: 'Deep Learning (Markdown note)', detail: 'edited on GitHub' },
+		],
+		restore: [],
+		server: [
+			{ path: 'my-library/items/BE/BERT0001.json', title: 'BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding', action: 'update' },
+			{ path: 'my-library/items/IM/IMGNET01.json', title: 'ImageNet Classification with Deep Convolutional Neural Networks', action: 'update' },
+			{ path: 'my-library/items/OL/OLDITEM1.json', title: 'Learning Representations by Back-propagating Errors', action: 'delete' },
+		],
+	});
+	await sleep(1500);
+	await capture(win, PathUtils.join(outDir, '07-review-panel.png'));
+	plugin.Review.close();
+	await reviewPromise;
+
 	// 4. Settings pane, section by section
 	Zotero.Utilities.Internal.openPreferences(plugin.prefPaneID);
 	let prefWin = await waitFor(() => {

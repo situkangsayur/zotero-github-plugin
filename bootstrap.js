@@ -15,9 +15,12 @@ var SOURCE_FILES = [
 	'src/files.js',
 	'src/prefs.js',
 	'src/github.js',
+	'src/planner.js',
+	'src/state.js',
 	'src/exporter.js',
 	'src/importer.js',
 	'src/sync.js',
+	'src/review.js',
 	'src/ui.js',
 ];
 

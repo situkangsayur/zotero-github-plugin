@@ -62,6 +62,9 @@ ZoteroGitHubSync.UI = {
 		if (status === 'syncing') {
 			lines.push(Sync.describeProgress(progress) || get('progress.collecting'), get('toolbar.clickForProgress'));
 		}
+		else if (status === 'attention') {
+			lines.push(get('toolbar.attention', String(Sync.pendingReview || ZoteroGitHubSync.Prefs.get('pendingReview') || '')));
+		}
 		else {
 			let lastError = ZoteroGitHubSync.Prefs.get('lastError');
 			let lastSync = ZoteroGitHubSync.Prefs.get('lastSync');
@@ -98,6 +101,13 @@ ZoteroGitHubSync.UI = {
 		link.setAttribute('href', `${ZoteroGitHubSync.rootURI}content/toolbar.css`);
 		doc.documentElement.appendChild(link);
 		elements.push(link);
+
+		let reviewLink = doc.createElementNS('http://www.w3.org/1999/xhtml', 'link');
+		reviewLink.id = 'zotero-github-sync-review-stylesheet';
+		reviewLink.setAttribute('rel', 'stylesheet');
+		reviewLink.setAttribute('href', `${ZoteroGitHubSync.rootURI}content/review.css`);
+		doc.documentElement.appendChild(reviewLink);
+		elements.push(reviewLink);
 	},
 
 
@@ -131,7 +141,7 @@ ZoteroGitHubSync.UI = {
 				: [];
 			for (let entry of [...entries, ...this._menuEntries(win)]) {
 				let item = this._createMenuItem(doc, entry);
-				if (running && ['sync-now', 'sync-selected', 'pull'].includes(entry.id)) {
+				if (running && ['sync-now', 'review', 'sync-selected', 'pull'].includes(entry.id)) {
 					item.setAttribute('disabled', 'true');
 				}
 				popup.append(item);
@@ -140,11 +150,12 @@ ZoteroGitHubSync.UI = {
 		popup.addEventListener('popupshowing', rebuild);
 
 		button.addEventListener('command', () => {
-			if (ZoteroGitHubSync.Sync.isRunning) {
-				ZoteroGitHubSync.Sync._openProgressWindow();
+			let Sync = ZoteroGitHubSync.Sync;
+			if (Sync.isRunning) {
+				Sync._openProgressWindow();
 				return;
 			}
-			ZoteroGitHubSync.Sync.syncNow({ trigger: 'button' })
+			Sync.syncNow({ trigger: 'button', forceReview: Sync.status === 'attention' })
 				.catch(e => ZoteroGitHubSync.logError(e));
 		});
 		button.addEventListener('contextmenu', (event) => {
@@ -260,6 +271,12 @@ ZoteroGitHubSync.UI = {
 				id: 'sync-now',
 				label: ZoteroGitHubSync.getString('menu.syncNow'),
 				command: () => ZoteroGitHubSync.Sync.syncNow({ trigger: 'menu' })
+					.catch(e => ZoteroGitHubSync.logError(e)),
+			},
+			{
+				id: 'review',
+				label: ZoteroGitHubSync.getString('menu.review'),
+				command: () => ZoteroGitHubSync.Sync.syncNow({ trigger: 'review', forceReview: true })
 					.catch(e => ZoteroGitHubSync.logError(e)),
 			},
 			{

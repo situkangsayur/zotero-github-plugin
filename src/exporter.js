@@ -117,7 +117,7 @@ ZoteroGitHubSync.Exporter = {
 		}
 		else {
 			topLevelItems = (await Zotero.Items.getAll(library.libraryID, true, false))
-				.filter(item => !item.deleted);
+				.filter(item => !item.deleted && item.isTopLevelItem() && !item.isAnnotation?.());
 		}
 
 		// Sorting keeps index.md and the BibTeX file stable across syncs
@@ -126,6 +126,11 @@ ZoteroGitHubSync.Exporter = {
 		let exported = [];
 		let ctx = { library, dir, collections, config, out };
 		for (let item of topLevelItems) {
+			// getAll(..., onlyTopLevel) leaves annotations in; they belong under
+			// their attachment, like every other child
+			if (!item.isTopLevelItem() || item.isAnnotation?.()) {
+				continue;
+			}
 			let record = await this._buildItemRecord({ item, ctx });
 			exported.push(record);
 

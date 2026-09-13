@@ -56,3 +56,4 @@ pref("extensions.zotero-github-sync.lastSync", "");
 pref("extensions.zotero-github-sync.lastCommit", "");
 pref("extensions.zotero-github-sync.lastError", "");
 pref("extensions.zotero-github-sync.lastWarnings", "");
+pref("extensions.zotero-github-sync.pendingReview", 0);

@@ -196,6 +196,24 @@ collections, searches, tag colors, warnings). To check the files themselves, com
 `sha256sum` of every file under `storage/` in the source data directory and in
 `~/zgs-import-test/data`.
 
+## Testing two computers
+
+`scripts/conflict-test/` has two throwaway profiles, A and B, take turns against one
+throwaway repository, one headless Zotero launch per step: A creates a library and syncs; B
+starts empty and imports it; A edits, deletes and adds; B, still behind, edits the same item
+and adds a note in a background sync; B reviews (taking GitHub's version of the conflict,
+importing the addition, declining to restore the deletion); A accepts B's note. The review
+panel is replaced by a scripted chooser. Each step writes `out/<step>.json` with the sync
+result, what the review offered, and the library and repository afterwards.
+
+```bash
+scp build/zotero-github-sync-<version>.xpi host:zgs-conflict/zotero-github-sync.xpi
+scp zgs-conflict-test.xpi host:zgs-conflict/zgs-conflict-test.xpi   # zip of scripts/conflict-test/addon
+(echo 'export ZGS_OWNER=me ZGS_REPO=sync-test ZGS_BASE_PATH=run-1'; cat scripts/conflict-test/run-remote.sh) | ssh host 'bash -s'
+```
+
+Use a new `ZGS_BASE_PATH` for each run so the repository never has to be emptied.
+
 ## Tutorial screenshots
 
 The images in `docs/images/` come from a real Zotero, not mockups, in a throwaway profile

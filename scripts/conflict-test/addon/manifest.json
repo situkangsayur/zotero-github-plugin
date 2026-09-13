@@ -1,0 +1,14 @@
+{
+	"manifest_version": 2,
+	"name": "Zotero GitHub Sync -- Two-Computer Test",
+	"version": "0.0.1",
+	"description": "DEVELOPMENT ONLY. Plays one computer in a scripted two-computer sync test against a throwaway repository, writes a report, and quits. Never install in a real profile.",
+	"applications": {
+		"zotero": {
+			"id": "zgs-conflict-test@situkangsayur.github.io",
+			"update_url": "https://example.invalid/none.json",
+			"strict_min_version": "6.999",
+			"strict_max_version": "10.*"
+		}
+	}
+}

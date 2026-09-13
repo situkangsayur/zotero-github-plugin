@@ -4,6 +4,60 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-09-13
+
+### Added
+
+- **Three-way sync.** Each computer keeps, per repository, the blob SHA of every file it
+  last synced (`<profile>/zotero-github-sync/state/`). Every sync compares Zotero's export,
+  the branch, and that record, and sorts each path into: upload, delete, changed on GitHub,
+  changed in both places, deleted on GitHub, or a generated file edited on GitHub.
+  Installations upgrading from 0.2 adopt the branch as their record when this computer made
+  its latest commit.
+- **Review panel**, drawn inside Zotero's main window (not a separate or modal window):
+  import changes from GitHub, choose Zotero's or GitHub's version when both changed — or keep
+  both, for files — upload items deleted on GitHub again, and exclude any file the sync would
+  replace or delete. **Tools → GitHub Sync → Review Changes and Sync…** opens it on demand.
+- **Background syncs never decide for you.** They upload what is safe, leave everything that
+  needs a decision untouched, and mark the toolbar button with an orange dot and a count.
+- A computer syncing a repository for the first time compares modification dates to tell
+  which side of a differing item is newer, and treats anything it can't tell apart as a
+  conflict.
+- `scripts/conflict-test/`: a scripted two-computer test in throwaway profiles.
+
+### Changed
+
+- **Deletion is driven by the last-synced record**, not by what this computer's library
+  happens to contain: a computer that is behind can no longer delete another computer's
+  items from the repository. A computer with no record deletes nothing.
+- **Import never replaces a local attachment file that differs** from the repository copy;
+  it keeps the local file and reports it. Choosing GitHub's version in the review replaces
+  it; "keep both" adds the repository copy as a second attachment.
+- Imported items keep the repository's modification date, so exporting them again produces
+  identical files instead of another commit.
+
+### Fixed
+
+- **Stale reads after a commit.** GitHub marks API responses cacheable for 60 seconds, and
+  a branch head served from the HTTP cache made the next commit build on an outdated parent,
+  which GitHub refused as "not a fast forward" — for example when two computers synced within
+  a minute. Requests now bypass the cache.
+- **Annotations were also exported as top-level items**, each with its own item JSON and
+  Markdown note, because `Zotero.Items.getAll(…, onlyTopLevel)` includes them. They are now
+  only written under their attachment; the first sync with 0.3.0 removes the extra files.
+
+### Verification status
+
+On Zotero 10 (Linux), two throwaway profiles took turns syncing one repository: a first sync
+into an empty repository; an empty second computer importing everything through the review
+with no extra commit; edits, a deletion and an addition on the first computer; the second
+computer, still behind, editing the same item and adding a note in a background sync — its
+note was uploaded while the first computer's edit, addition and deletion were all left
+intact and flagged for review; the review then taking GitHub's version of the conflicting
+item, importing the addition and declining to re-upload the deleted item; and the first
+computer accepting the other's note. The review panel, attention state and all other
+screenshots were rendered in Zotero.
+
 ## [0.2.1] — 2026-09-13
 
 ### Fixed

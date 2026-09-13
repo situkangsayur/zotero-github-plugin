@@ -21,9 +21,12 @@ bootstrap.js            Zotero lifecycle hooks
     ├── files.js        attachment files on disk: hashing, hash cache, transfers
     ├── prefs.js        preference access, token storage
     ├── github.js       GitHub REST client and Git LFS client
+    ├── planner.js      three-way comparison: what to push, delete, import or ask about
+    ├── state.js        what this computer last synced, per repository
     ├── exporter.js     Zotero library -> repository files
     ├── importer.js     repository files -> Zotero library
-    ├── sync.js         diffing, committing, scheduling
+    ├── sync.js         analyse, decide, act; scheduling
+    ├── review.js       review panel inside the main window
     └── ui.js           toolbar button, menus
 ```
 
@@ -120,17 +123,51 @@ That constraint shapes the exporter:
 The plugin version *is* in `manifest.json`, so upgrading produces exactly one extra
 commit. That is deliberate: it dates the format the repository was written with.
 
+### Three-way comparison
+
+Two versions of a file can't say which side changed. The plugin keeps a third: for every
+path, the blob SHA both sides held after this computer's last successful sync (`State`, one
+JSON file per repository, branch and base path, in the profile directory — it describes
+this computer and must not travel with the library). `Planner.plan()` then classifies each
+path from `local` (export), `remote` (branch) and `base`:
+
+| local vs remote vs base | Action |
+| --- | --- |
+| local = remote | nothing |
+| remote = base, local differs | push |
+| local gone, remote = base | delete (if the path is on `files.json`) |
+| local = base, remote differs, or only on the remote | incoming |
+| all three differ | conflict |
+| remote gone, local still there | restore |
+| no base, both differ | diverged: item dates decide, otherwise conflict |
+
+Generated files (Markdown, indexes, manifests) can't be imported, so a server-side edit to
+one is reported as *overwrite* rather than incoming. Paths kept because their file isn't on
+this computer are left out entirely.
+
+`Sync._runSync()` runs in three stages. **Analyse** exports, reads the branch, hashes, loads
+the base and plans. **Decide** returns immediately when nothing needs a decision; otherwise
+a manual sync awaits `Review.ask()` and a background sync takes no decision at all. Accepted
+changes are imported with `Importer.applyIncoming()`, which forces updates and overwrites
+files because that was the choice, and the sync starts over with the same decisions — the
+library changed, so the export must be redone. **Act** pushes and deletes, then stores the
+next base with `Planner.nextBase()`: a path is recorded only where both sides now agree, and
+every undecided or excluded path keeps its old record, so the same question comes back next
+time instead of silently becoming a push or a delete.
+
 ### Pruning only touches our own files
 
 Deleting remote files that no longer exist locally is the dangerous half of a sync. Naïve
 approaches — "delete everything under the base path that we did not just write" — destroy
 unrelated files the moment someone points the plugin at a repository root.
 
-Instead the plugin keeps `.zotero-sync/files.json`: the sorted list of paths it wrote on
-the last full sync. Pruning is `previous_list − current_export`, intersected with what is
-actually in the tree. A file the plugin has never written is not on the list and can never
-be deleted. A repository with no `files.json` yet (a first sync into an existing
-repository) prunes nothing at all.
+Instead two records must agree before anything is deleted. `.zotero-sync/files.json` is the
+sorted list of paths the plugin wrote on the last full sync: a file the plugin has never
+written is not on it and can never be deleted, so pointing the plugin at a repository root
+is safe. And the base above must show that this computer synced the path and that the
+branch still holds exactly that version: a path merely absent from this computer's export —
+because another computer added it — is incoming, not a deletion. A computer with no base
+deletes nothing at all.
 
 The list is also the reason partial syncs — selected items, a collection — never prune:
 they are not authoritative about what the library contains, so they do not rewrite the

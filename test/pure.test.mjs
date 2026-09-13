@@ -5,7 +5,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import assert from 'node:assert/strict';
 const SRC = new URL('../src', import.meta.url).pathname;
 globalThis.ZoteroGitHubSync = { log(){}, warn(){}, logError: console.error, version: '0.2.0', getString: k => k };
-for (const f of ['utils.js', 'exporter.js', 'importer.js', 'sync.js']) vm.runInThisContext(readFileSync(`${SRC}/${f}`, 'utf8'));
+for (const f of ['utils.js', 'exporter.js', 'importer.js', 'planner.js', 'sync.js']) vm.runInThisContext(readFileSync(`${SRC}/${f}`, 'utf8'));
 const U = ZoteroGitHubSync.Utils, E = ZoteroGitHubSync.Exporter, I = ZoteroGitHubSync.Importer;
 
 // base64 across block boundaries
@@ -49,7 +49,7 @@ const libs = I.groupByLibrary(tree, { basePath: 'zotero' });
 const g = libs.get('my-library');
 assert.deepEqual(g.items.map(i => i.key).sort(), ['ABCD1234', 'ZZZZ9999']);
 assert.equal(g.searches.sha, 'q'); assert.equal(g.settings.sha, 's' + 't');
-assert.deepEqual(g.files.get('SNAP0001'), [{ name: 'sub/dir/img.png', sha: 'f2', size: 5, lfs: false }]);
+assert.deepEqual(g.files.get('SNAP0001'), [{ path: 'my-library/attachments/SN/SNAP0001/sub/dir/img.png', name: 'sub/dir/img.png', sha: 'f2', size: 5, lfs: false }]);
 assert.equal(g.files.get('BIGF0001')[0].lfs, true);
 assert.equal(g.files.size, 3);
 // flattenRecords ordering
@@ -99,4 +99,102 @@ assert.equal(orderedAttachment[0], 'itemType');
 const orderedAnnotation = Object.keys(I.orderForFromJSON({ annotationColor: '#ffd400', annotationComment: 'x', annotationType: 'highlight', itemType: 'annotation', parentItem: 'WXYZ5678' }));
 assert.ok(orderedAnnotation.indexOf('annotationType') < orderedAnnotation.indexOf('annotationColor'));
 assert.equal(orderedAnnotation.length, 5);
+// -- Planner: three-way classification --------------------------------------
+const P = ZoteroGitHubSync.Planner;
+const M = obj => new Map(Object.entries(obj));
+const ITEM = k => `my-library/items/${k.slice(0, 2)}/${k}.json`;
+const FILE = (k, n) => `my-library/attachments/${k.slice(0, 2)}/${k}/${n}`;
+const MD = t => `my-library/notes/${t[0]}/${t}.md`;
+assert.equal(P.importable(ITEM('ABCD1234')).kind, 'item');
+assert.equal(P.importable(FILE('WXYZ5678', 'a.pdf')).kind, 'file');
+assert.equal(P.importable('my-library/attachments-lfs/.gitattributes'), null);
+assert.equal(P.importable('my-library/collections.json').kind, 'library');
+assert.equal(P.importable(MD('Title (ABCD1234)')), null);
+
+{
+	// With a base: every case
+	const base = M({
+		[ITEM('AAAAAAAA')]: 'a1', // unchanged
+		[ITEM('BBBBBBBB')]: 'b1', // changed locally
+		[ITEM('CCCCCCCC')]: 'c1', // changed on server
+		[ITEM('DDDDDDDD')]: 'd1', // changed on both
+		[ITEM('EEEEEEEE')]: 'e1', // deleted locally
+		[ITEM('FFFFFFFF')]: 'f1', // deleted on server
+		[MD('Edited (GGGGGGGG)')]: 'g1', // derived, edited on server
+		[FILE('KKKKKKKK', 'x.pdf')]: 'k1', // kept: file not on this computer
+	});
+	const local = M({
+		[ITEM('AAAAAAAA')]: 'a1', [ITEM('BBBBBBBB')]: 'b2', [ITEM('CCCCCCCC')]: 'c1',
+		[ITEM('DDDDDDDD')]: 'd2', [ITEM('FFFFFFFF')]: 'f1', [MD('Edited (GGGGGGGG)')]: 'g1',
+		[ITEM('NNNNNNNN')]: 'n1', // new locally
+	});
+	const remote = M({
+		[ITEM('AAAAAAAA')]: 'a1', [ITEM('BBBBBBBB')]: 'b1', [ITEM('CCCCCCCC')]: 'c2',
+		[ITEM('DDDDDDDD')]: 'd3', [ITEM('EEEEEEEE')]: 'e1', [MD('Edited (GGGGGGGG)')]: 'g2',
+		[ITEM('RRRRRRRR')]: 'r1', // added on the server by another computer
+		[FILE('KKKKKKKK', 'x.pdf')]: 'k1',
+	});
+	const plan = P.plan({ local, remote, base, kept: new Set([FILE('KKKKKKKK', 'x.pdf')]) });
+	assert.deepEqual(plan.push, [ITEM('BBBBBBBB'), ITEM('NNNNNNNN')]);
+	assert.deepEqual(plan.delete, [ITEM('EEEEEEEE')]);
+	assert.deepEqual(plan.incoming, [ITEM('CCCCCCCC'), ITEM('RRRRRRRR')]);
+	assert.deepEqual(plan.conflicts, [ITEM('DDDDDDDD')]);
+	assert.deepEqual(plan.overwrite, [MD('Edited (GGGGGGGG)')]);
+	assert.deepEqual(plan.restore, [ITEM('FFFFFFFF')]);
+	assert.ok(plan.unchanged.includes(FILE('KKKKKKKK', 'x.pdf')));
+	assert.ok(P.needsReview(plan));
+
+	// After a sync that skipped the undecided paths, they keep their old base
+	const undecided = new Set([...plan.incoming, ...plan.conflicts, ...plan.overwrite, ...plan.restore]);
+	const after = new Map(remote);
+	after.set(ITEM('BBBBBBBB'), 'b2'); after.set(ITEM('NNNNNNNN'), 'n1'); after.delete(ITEM('EEEEEEEE'));
+	const next = P.nextBase({ local, remote: after, base, undecided, kept: new Set([FILE('KKKKKKKK', 'x.pdf')]) });
+	assert.equal(next.get(ITEM('BBBBBBBB')), 'b2');
+	assert.equal(next.get(ITEM('CCCCCCCC')), 'c1', 'incoming stays pending');
+	assert.equal(next.get(ITEM('DDDDDDDD')), 'd1', 'conflict stays pending');
+	assert.equal(next.has(ITEM('EEEEEEEE')), false, 'deleted path leaves the base');
+	assert.equal(next.has(ITEM('RRRRRRRR')), false, 'remote-only item is not recorded as synced');
+	assert.equal(next.get(FILE('KKKKKKKK', 'x.pdf')), 'k1');
+	// ...so a second sync asks the same questions and still deletes nothing new
+	const again = P.plan({ local, remote: after, base: next, kept: new Set([FILE('KKKKKKKK', 'x.pdf')]) });
+	assert.deepEqual(again.delete, []);
+	assert.deepEqual(again.incoming, [ITEM('CCCCCCCC'), ITEM('RRRRRRRR')]);
+	assert.deepEqual(again.conflicts, [ITEM('DDDDDDDD')]);
+}
+
+{
+	// The multi-computer hazard: computer B is behind and has never synced.
+	// It must not delete A's item, and must not silently overwrite what differs.
+	const remote = M({ [ITEM('AAAAAAAA')]: 'a2', [ITEM('XXXXXXXX')]: 'x1', [MD('A (AAAAAAAA)')]: 'm1', [FILE('PPPPPPPP', 'p.pdf')]: 'p1' });
+	const local = M({ [ITEM('AAAAAAAA')]: 'a1', [MD('A (AAAAAAAA)')]: 'm0', [FILE('PPPPPPPP', 'p.pdf')]: 'p0' });
+	const plan = P.plan({ local, remote, base: null });
+	assert.deepEqual(plan.delete, []);
+	assert.deepEqual(plan.incoming, [ITEM('XXXXXXXX')]);
+	assert.deepEqual(plan.diverged, [FILE('PPPPPPPP', 'p.pdf'), ITEM('AAAAAAAA')].sort());
+	assert.deepEqual(plan.push, [MD('A (AAAAAAAA)')]);
+}
+
+{
+	// Partial sync: only exported paths, never deletions
+	const plan = P.plan({
+		local: M({ [ITEM('AAAAAAAA')]: 'a2' }),
+		remote: M({ [ITEM('AAAAAAAA')]: 'a1', [ITEM('BBBBBBBB')]: 'b1' }),
+		base: M({ [ITEM('AAAAAAAA')]: 'a1', [ITEM('BBBBBBBB')]: 'b1' }),
+		fullSync: false,
+	});
+	assert.deepEqual(plan.push, [ITEM('AAAAAAAA')]);
+	assert.deepEqual(plan.delete, []);
+	assert.ok(!P.needsReview(plan));
+}
+
+{
+	// Deletions are limited to paths the plugin manages
+	const plan = P.plan({
+		local: M({}),
+		remote: M({ [ITEM('AAAAAAAA')]: 'a1', 'my-library/notes/other.md': 'o1' }),
+		base: M({ [ITEM('AAAAAAAA')]: 'a1', 'my-library/notes/other.md': 'o1' }),
+		managed: new Set([ITEM('AAAAAAAA')]),
+	});
+	assert.deepEqual(plan.delete, [ITEM('AAAAAAAA')]);
+}
 console.log('all pure-logic tests passed');
