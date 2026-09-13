@@ -120,7 +120,7 @@ async function createSampleLibrary() {
 	};
 	let papers = await makeCollection('Papers');
 	let nlp = await makeCollection('NLP', papers.key);
-	let quantum = await makeCollection('Quantum Computing', papers.key);
+	let vision = await makeCollection('Computer Vision', papers.key);
 	let books = await makeCollection('Books');
 
 	let samples = [
@@ -138,16 +138,16 @@ async function createSampleLibrary() {
 			fields: { publicationTitle: 'NAACL-HLT', DOI: '10.18653/v1/N19-1423' }, tags: ['transformers'],
 		},
 		{
-			type: 'journalArticle', collection: quantum,
-			title: 'Quantum supremacy using a programmable superconducting processor', date: '2019',
-			creators: [['Frank', 'Arute']],
-			fields: { publicationTitle: 'Nature', volume: '574', pages: '505-510', DOI: '10.1038/s41586-019-1666-5' }, tags: ['quantum'],
+			type: 'conferencePaper', collection: vision,
+			title: 'Deep Residual Learning for Image Recognition', date: '2016',
+			creators: [['Kaiming', 'He'], ['Xiangyu', 'Zhang'], ['Shaoqing', 'Ren'], ['Jian', 'Sun']],
+			fields: { proceedingsTitle: 'IEEE Conference on Computer Vision and Pattern Recognition', DOI: '10.1109/CVPR.2016.90' }, tags: ['CNN', 'vision'],
 		},
 		{
-			type: 'journalArticle', collection: quantum,
-			title: 'Quantum Computing in the NISQ era and beyond', date: '2018',
-			creators: [['John', 'Preskill']],
-			fields: { publicationTitle: 'Quantum', volume: '2', pages: '79', DOI: '10.22331/q-2018-08-06-79' }, tags: ['quantum', 'NISQ'],
+			type: 'journalArticle', collection: vision,
+			title: 'ImageNet Classification with Deep Convolutional Neural Networks', date: '2017',
+			creators: [['Alex', 'Krizhevsky'], ['Ilya', 'Sutskever'], ['Geoffrey E.', 'Hinton']],
+			fields: { publicationTitle: 'Communications of the ACM', volume: '60', pages: '84-90', DOI: '10.1145/3065386' }, tags: ['CNN', 'ImageNet'],
 		},
 		{
 			type: 'book', collection: books,
