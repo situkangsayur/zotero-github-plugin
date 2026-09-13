@@ -1,0 +1,66 @@
+/* Zotero GitHub Sync -- toolbar button next to Zotero's own sync button.
+ *
+ * Loaded into the main window by the plugin (src/ui.js) and removed with it, so
+ * everything here is scoped to our own element IDs.
+ */
+
+#zotero-github-sync-button {
+	list-style-image: url("icons/github-20.svg");
+	-moz-context-properties: fill, fill-opacity;
+	fill: currentColor;
+	position: relative;
+}
+
+#zotero-github-sync-button .toolbarbutton-icon {
+	width: 16px;
+	height: 16px;
+	transform-origin: 50% 50%;
+}
+
+/* The percentage beside the icon, shown only while syncing */
+#zotero-github-sync-button .toolbarbutton-text {
+	display: none !important;
+	font-size: 11px;
+	font-variant-numeric: tabular-nums;
+	margin-inline-start: 4px;
+}
+
+#zotero-github-sync-button[zgs-status="syncing"] {
+	width: auto !important;
+	padding-inline: 4px 6px !important;
+}
+
+#zotero-github-sync-button[zgs-status="syncing"] .toolbarbutton-text {
+	display: inline-flex !important;
+	align-items: center;
+}
+
+#zotero-github-sync-button[zgs-status="syncing"] .toolbarbutton-icon {
+	animation: zgs-spin 1.4s linear infinite;
+}
+
+#zotero-github-sync-button[zgs-waiting="true"] .toolbarbutton-icon {
+	animation-duration: 4s;
+	opacity: 0.6;
+}
+
+#zotero-github-sync-button[zgs-status="error"] {
+	fill: #d7263d;
+	color: #d7263d;
+}
+
+#zotero-github-sync-button[zgs-status="error"]::after {
+	content: "";
+	position: absolute;
+	top: 3px;
+	inset-inline-end: 3px;
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	background: #d7263d;
+}
+
+@keyframes zgs-spin {
+	from { transform: rotate(0deg); }
+	to { transform: rotate(360deg); }
+}

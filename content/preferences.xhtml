@@ -89,20 +89,31 @@
 					preference="extensions.zotero-github-sync.includeNotes"/>
 			<checkbox label="Group libraries"
 					preference="extensions.zotero-github-sync.includeGroupLibraries"/>
-			<checkbox id="zgs-include-attachments" label="Attachment files (PDFs and other stored files)"
+			<checkbox id="zgs-include-attachments" label="Attachment files (PDFs, books, snapshots, note images)"
 					preference="extensions.zotero-github-sync.includeAttachments"/>
+			<checkbox class="zgs-indent" label="Include linked files stored outside the Zotero data directory"
+					preference="extensions.zotero-github-sync.includeLinkedFiles"/>
+
+			<hbox align="center" class="zgs-indent">
+				<checkbox label="Store files larger than"
+						preference="extensions.zotero-github-sync.lfsEnabled"/>
+				<html:input id="zgs-lfs-threshold" type="text" size="5"
+						preference="extensions.zotero-github-sync.lfsThresholdMB"/>
+				<label value="MB with Git LFS"/>
+			</hbox>
 
 			<hbox align="center" class="zgs-indent">
 				<label control="zgs-max-attachment" value="Skip attachments larger than"/>
 				<html:input id="zgs-max-attachment" type="text" size="5"
 						preference="extensions.zotero-github-sync.maxAttachmentMB"/>
-				<label value="MB"/>
+				<label value="MB (0 = no limit)"/>
 			</hbox>
 
 			<html:div class="zgs-hint">
-				GitHub rejects files over 100 MB and warns above 50 MB, and a repository full of
-				PDFs gets large quickly. Leaving attachments off keeps the repository small and
-				still captures every item, note and tag.
+				GitHub refuses files over 100 MB in Git, so larger files go to Git LFS, which counts
+				against the account's LFS quota (10 GiB storage and bandwidth on GitHub Free).
+				GitHub recommends keeping a repository under 10 GB. Notes, annotations, collections,
+				saved searches and tag colors are always synced.
 			</html:div>
 
 			<checkbox label="Remove files from the repository when their items are deleted"
@@ -134,6 +145,9 @@
 
 			<checkbox label="Sync shortly after Zotero starts"
 					preference="extensions.zotero-github-sync.syncOnStartup"/>
+
+			<checkbox label="Sync to GitHub after Zotero's own sync finishes (the sync button in the toolbar)"
+					preference="extensions.zotero-github-sync.syncAfterZoteroSync"/>
 
 			<html:div class="zgs-hint">
 				A sync that finds nothing to change makes no commit, so a short interval is cheap
@@ -175,6 +189,8 @@
 			<hbox align="center" pack="start">
 				<button id="zgs-sync-now" label="Sync now"
 						oncommand="ZoteroGitHubSyncPrefs.syncNow()"/>
+				<button id="zgs-cancel" label="Cancel sync" hidden="true"
+						oncommand="ZoteroGitHubSyncPrefs.cancel()"/>
 				<button id="zgs-pull" label="Import from GitHub…"
 						oncommand="ZoteroGitHubSyncPrefs.pull()"/>
 				<button id="zgs-open-repo" label="Open repository"

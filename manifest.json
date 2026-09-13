@@ -1,8 +1,8 @@
 {
 	"manifest_version": 2,
 	"name": "Zotero GitHub Sync",
-	"version": "0.1.0",
-	"description": "Sync your Zotero library (metadata, notes, and optionally attachments) to a public or private GitHub repository -- manually, from a button, or on a schedule.",
+	"version": "0.2.0",
+	"description": "Back up your whole Zotero library -- metadata, notes, annotations and PDFs -- to a public or private GitHub repository, with Git LFS for large files.",
 	"homepage_url": "https://github.com/situkangsayur/zotero-github-plugin",
 	"author": "situkangsayur",
 	"icons": {
@@ -13,7 +13,8 @@
 		"zotero": {
 			"id": "zotero-github-sync@situkangsayur.github.io",
 			"update_url": "https://raw.githubusercontent.com/situkangsayur/zotero-github-plugin/main/update.json",
-			"strict_min_version": "6.999"
+			"strict_min_version": "6.999",
+			"strict_max_version": "10.*"
 		}
 	}
 }

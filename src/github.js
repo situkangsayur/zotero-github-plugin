@@ -26,13 +26,22 @@ ZoteroGitHubSync.GitHub = class GitHubClient {
 	 * @param {String} options.owner
 	 * @param {String} options.repo
 	 */
-	constructor({ token, apiURL, owner, repo }) {
+	constructor({ token, apiURL, owner, repo, limiter = null, cancel = null, onWait = null }) {
 		this.token = token;
 		this.apiURL = (apiURL || 'https://api.github.com').replace(/\/+$/, '');
 		this.owner = owner;
 		this.repo = repo;
 		this.rateLimitRemaining = null;
+		// Paces requests that create content (POST/PUT/PATCH)
+		this.limiter = limiter;
+		this.cancel = cancel;
+		// Called with the time a rate-limit wait ends, so the UI can say so
+		this.onWait = onWait;
 	}
+
+
+	static RATE_LIMIT_RETRIES = 6;
+	static MAX_RATE_LIMIT_WAIT = 15 * 60 * 1000;
 
 
 	get repoPath() {
@@ -57,18 +66,37 @@ ZoteroGitHubSync.GitHub = class GitHubClient {
 	 * @param {String} path - Absolute URL or a path relative to the API root
 	 * @param {Object} [options]
 	 * @param {Object} [options.body] - Serialized as JSON
+	 * @param {String} [options.rawBody] - Already-serialized JSON, for payloads
+	 * 		too large to run through JSON.stringify() a second time
+	 * @param {Boolean} [options.raw] - Ask for raw content and return it as text
 	 * @param {Number[]} [options.allowStatus] - Statuses to return instead of throwing
+	 * @param {Number} [options.timeout] - Milliseconds
 	 * @param {Number} [options.retries=2] - Retries left for rate limiting / 5xx
-	 * @return {Promise<Object>} { status, data, headers }
+	 * @return {Promise<Object>} { status, data, xhr }
 	 */
-	async request(method, path, { body, allowStatus = [], retries = 2 } = {}) {
+	async request(method, path, options = {}) {
+		let {
+			body, rawBody, raw = false, allowStatus = [], timeout = 120000,
+			retries = 2, rateLimitRetries = GitHubClient.RATE_LIMIT_RETRIES,
+		} = options;
+		this.cancel?.throwIfCancelled();
+		if (method !== 'GET' && this.limiter) {
+			await this.limiter.acquire({ cancel: this.cancel, onWait: this.onWait });
+		}
 		let url = /^https?:\/\//.test(path) ? path : this.apiURL + path;
 		let headers = {
-			Accept: 'application/vnd.github+json',
+			Accept: raw ? 'application/vnd.github.raw+json' : 'application/vnd.github+json',
 			'X-GitHub-Api-Version': '2022-11-28',
 			Authorization: `Bearer ${this.token}`,
 		};
-		if (body !== undefined) {
+		let payload;
+		if (rawBody !== undefined) {
+			payload = rawBody;
+		}
+		else if (body !== undefined) {
+			payload = JSON.stringify(body);
+		}
+		if (payload !== undefined) {
 			headers['Content-Type'] = 'application/json';
 		}
 
@@ -76,9 +104,9 @@ ZoteroGitHubSync.GitHub = class GitHubClient {
 		try {
 			xhr = await Zotero.HTTP.request(method, url, {
 				headers,
-				body: body === undefined ? undefined : JSON.stringify(body),
+				body: payload,
 				successCodes: false,
-				timeout: 120000,
+				timeout,
 				// Blob uploads are base64 payloads and tokens travel in headers;
 				// keep both out of the debug log
 				logBodyLength: 0,
@@ -99,7 +127,11 @@ ZoteroGitHubSync.GitHub = class GitHubClient {
 
 		let data = null;
 		let text = xhr.responseText;
-		if (text) {
+		let ok = status >= 200 && status < 300;
+		if (raw && ok) {
+			data = text;
+		}
+		else if (text) {
 			try {
 				data = JSON.parse(text);
 			}
@@ -108,24 +140,23 @@ ZoteroGitHubSync.GitHub = class GitHubClient {
 			}
 		}
 
-		if (status >= 200 && status < 300) {
-			return { status, data, xhr };
-		}
-		if (allowStatus.includes(status)) {
+		if (ok || allowStatus.includes(status)) {
 			return { status, data, xhr };
 		}
 
-		// Primary rate limit (403 with no remaining quota) and secondary rate
-		// limit (403/429 with Retry-After) are both worth waiting out once
-		let retryAfter = this._retryDelay(xhr, status);
-		if (retryAfter !== null && retries > 0) {
+		// Rate limits are waited out, with backoff, rather than failing a sync
+		// that may already have uploaded hundreds of files
+		let attempt = GitHubClient.RATE_LIMIT_RETRIES - rateLimitRetries;
+		let retryAfter = this._retryDelay(xhr, status, data, attempt);
+		if (retryAfter !== null && rateLimitRetries > 0) {
 			ZoteroGitHubSync.log(`Rate limited by GitHub; retrying in ${Math.round(retryAfter / 1000)}s`);
-			await Zotero.Promise.delay(retryAfter);
-			return this.request(method, path, { body, allowStatus, retries: retries - 1 });
+			this.onWait?.(Date.now() + retryAfter);
+			await this._sleep(retryAfter);
+			return this.request(method, path, { ...options, rateLimitRetries: rateLimitRetries - 1 });
 		}
 		if (status >= 500 && retries > 0) {
-			await Zotero.Promise.delay(2000);
-			return this.request(method, path, { body, allowStatus, retries: retries - 1 });
+			await this._sleep(2000 * (3 - retries));
+			return this.request(method, path, { ...options, retries: retries - 1 });
 		}
 
 		throw new ZoteroGitHubSync.GitHubError(this._errorMessage(status, data), {
@@ -140,22 +171,32 @@ ZoteroGitHubSync.GitHub = class GitHubClient {
 	/**
 	 * @return {Number|null} Milliseconds to wait, or null if this isn't a rate limit
 	 */
-	_retryDelay(xhr, status) {
-		const MAX_WAIT = 90 * 1000;
+	_retryDelay(xhr, status, data, attempt) {
 		if (status !== 403 && status !== 429) {
 			return null;
 		}
+		let cap = ms => Math.min(GitHubClient.MAX_RATE_LIMIT_WAIT, Math.max(1000, ms));
 		let retryAfter = xhr.getResponseHeader('retry-after');
 		if (retryAfter) {
-			return Math.min(MAX_WAIT, (Number(retryAfter) || 60) * 1000);
+			return cap((Number(retryAfter) || 60) * 1000);
 		}
 		let remaining = xhr.getResponseHeader('x-ratelimit-remaining');
 		let reset = xhr.getResponseHeader('x-ratelimit-reset');
 		if (remaining === '0' && reset) {
-			let wait = Number(reset) * 1000 - Date.now();
-			return wait > 0 && wait <= MAX_WAIT ? wait : null;
+			return cap(Number(reset) * 1000 - Date.now() + 1000);
+		}
+		// A secondary rate limit without headers: GitHub asks for at least a
+		// minute, with exponential backoff if it keeps happening. A 403 that
+		// isn't about rate limits (a missing permission) is not retried.
+		if (status === 429 || /rate limit/i.test(data?.message || '')) {
+			return cap(60 * 1000 * 2 ** attempt);
 		}
 		return null;
+	}
+
+
+	_sleep(ms) {
+		return this.cancel ? this.cancel.sleep(ms) : Zotero.Promise.delay(ms);
 	}
 
 
@@ -245,6 +286,41 @@ ZoteroGitHubSync.GitHub = class GitHubClient {
 	}
 
 
+	/**
+	 * @return {Promise<Boolean>} Whether the repository has no commits at all.
+	 * 		The repository's `size` field can't tell: it lags and rounds to KB.
+	 */
+	async isEmpty() {
+		let { status } = await this.request('GET', `${this.repoPath}/commits?per_page=1`, {
+			allowStatus: [409],
+		});
+		return status === 409;
+	}
+
+
+	/**
+	 * The Git Data API refuses to work on a repository with no commits at all
+	 * ("409 Git Repository is empty"), but the Contents API can create a file
+	 * there, and with it the first commit and the default branch.
+	 *
+	 * @param {Object} options
+	 * @param {String} options.path
+	 * @param {String} options.text
+	 * @param {String} options.message
+	 * @return {Promise<String>} SHA of the commit created
+	 */
+	async createInitialCommit({ path, text, message }) {
+		let encodedPath = String(path).split('/').map(encodeURIComponent).join('/');
+		let { data } = await this.request('PUT', `${this.repoPath}/contents/${encodedPath}`, {
+			body: {
+				message,
+				content: ZoteroGitHubSync.Utils.toBase64(ZoteroGitHubSync.Utils.encode(text)),
+			},
+		});
+		return data.commit.sha;
+	}
+
+
 	async createRef(branch, sha) {
 		await this.request('POST', `${this.repoPath}/git/refs`, {
 			body: { ref: `refs/heads/${branch}`, sha },
@@ -315,9 +391,12 @@ ZoteroGitHubSync.GitHub = class GitHubClient {
 	 * @return {Promise<String>} Blob SHA
 	 */
 	async createBlob(base64Content) {
-		let { data } = await this.request('POST', `${this.repoPath}/git/blobs`, {
-			body: { content: base64Content, encoding: 'base64' },
-		});
+		// Base64 never needs escaping in JSON, so build the body directly rather
+		// than letting JSON.stringify() copy a large payload once more
+		let rawBody = `{"encoding":"base64","content":"${base64Content}"}`;
+		// Allow roughly 10 KB/s on top of the usual timeout before giving up
+		let timeout = 120000 + Math.ceil(base64Content.length / 10000) * 1000;
+		let { data } = await this.request('POST', `${this.repoPath}/git/blobs`, { rawBody, timeout });
 		return data.sha;
 	}
 
@@ -336,7 +415,37 @@ ZoteroGitHubSync.GitHub = class GitHubClient {
 
 
 	/**
-	 * @param {Object[]} entries - { path, mode, type, sha } (sha null deletes)
+	 * @param {String} sha
+	 * @return {Promise<String>} The blob decoded as UTF-8
+	 */
+	async getBlobText(sha) {
+		let { data } = await this.request('GET', `${this.repoPath}/git/blobs/${sha}`, { raw: true });
+		return data || '';
+	}
+
+
+	/**
+	 * Stream a blob to disk. GitHub serves blobs up to 100 MB this way.
+	 *
+	 * @param {String} sha
+	 * @param {String} path
+	 * @return {Promise<Number>} Bytes written
+	 */
+	async downloadBlob(sha, path) {
+		return ZoteroGitHubSync.Files.downloadToFile(`${this.apiURL}${this.repoPath}/git/blobs/${sha}`, {
+			path,
+			headers: {
+				Accept: 'application/vnd.github.raw+json',
+				'X-GitHub-Api-Version': '2022-11-28',
+				Authorization: `Bearer ${this.token}`,
+			},
+		});
+	}
+
+
+	/**
+	 * @param {Object[]} entries - { path, mode, type, sha } (sha null deletes), or
+	 * 		{ path, mode, type, content } to create a text blob in the same request
 	 * @param {String} [baseTree]
 	 * @return {Promise<String>} Tree SHA
 	 */
@@ -365,5 +474,212 @@ ZoteroGitHubSync.GitHub = class GitHubClient {
 		}
 		let { data } = await this.request('POST', `${this.repoPath}/git/commits`, { body });
 		return data.sha;
+	}
+};
+
+
+/**
+ * Git LFS over its HTTP batch API: https://github.com/git-lfs/git-lfs/blob/main/docs/api/batch.md
+ *
+ * Git itself never sees large attachments. The plugin uploads the file to LFS
+ * storage and commits a small pointer in its place, which is exactly what the
+ * git-lfs client would have done, so a normal `git clone` with LFS installed
+ * checks out the real file.
+ */
+ZoteroGitHubSync.GitLFS = class GitLFS {
+	static BATCH_SIZE = 100;
+
+
+	/**
+	 * @param {Object} options
+	 * @param {String} options.url - e.g. https://github.com/owner/repo.git/info/lfs
+	 * @param {String} options.username - Paired with the token for Basic auth
+	 * @param {String} options.token
+	 */
+	constructor({ url, username, token }) {
+		this.url = url.replace(/\/+$/, '');
+		this.authorization = 'Basic ' + btoa(`${username}:${token}`);
+	}
+
+
+	/**
+	 * @param {'upload'|'download'} operation
+	 * @param {Object[]} objects - { oid, size }
+	 * @param {String} [ref] - e.g. refs/heads/main
+	 * @return {Promise<Object[]>} The batch response's objects
+	 */
+	async batch(operation, objects, ref) {
+		let body = {
+			operation,
+			transfers: ['basic'],
+			objects: objects.map(o => ({ oid: o.oid, size: o.size })),
+			hash_algo: 'sha256',
+		};
+		if (ref) {
+			body.ref = { name: ref };
+		}
+		let response;
+		try {
+			response = await fetch(`${this.url}/objects/batch`, {
+				method: 'POST',
+				headers: {
+					Accept: 'application/vnd.git-lfs+json',
+					'Content-Type': 'application/vnd.git-lfs+json',
+					Authorization: this.authorization,
+				},
+				body: JSON.stringify(body),
+			});
+		}
+		catch (e) {
+			throw new Error(`Network error contacting Git LFS: ${e.message || e}`);
+		}
+		let data = null;
+		try {
+			data = await response.json();
+		}
+		catch (e) {}
+		if (!response.ok) {
+			throw new ZoteroGitHubSync.GitHubError(this._errorMessage(response.status, data), {
+				status: response.status,
+				url: this.url,
+				body: data,
+			});
+		}
+		return data?.objects || [];
+	}
+
+
+	_errorMessage(status, data) {
+		let detail = data?.message ? ` ${data.message}` : '';
+		switch (status) {
+			case 401:
+			case 403:
+				return `Git LFS denied access (${status}).${detail} The token needs Contents: Read and write.`;
+			case 404:
+				return `Git LFS endpoint not found (404).${detail}`;
+			case 413:
+				return `Git LFS rejected the file as too large (413).${detail}`;
+			case 422:
+				return `Git LFS rejected the request (422).${detail}`;
+			case 507:
+				return `Git LFS storage quota exceeded (507).${detail} Check the account's Git LFS billing.`;
+			case 509:
+				return `Git LFS bandwidth quota exceeded (509).${detail}`;
+			default:
+				return `Git LFS request failed (${status}).${detail}`;
+		}
+	}
+
+
+	_objectError(object) {
+		let error = object.error;
+		return new Error(
+			`Git LFS refused ${object.oid.slice(0, 12)}… (${error.code}): ${error.message || 'no reason given'}`
+		);
+	}
+
+
+	/**
+	 * Upload files LFS doesn't already have. Objects the server already stores
+	 * come back without an upload action and cost nothing.
+	 *
+	 * @param {Object[]} objects - { oid, size, path }
+	 * @param {Object} [options]
+	 * @param {String} [options.ref]
+	 * @param {Function} [options.onProgress] - (done, total)
+	 * @return {Promise<Number>} Objects actually uploaded
+	 */
+	async uploadAll(objects, { ref, cancel = null, onProgress = () => {} } = {}) {
+		let byOid = new Map(objects.map(o => [o.oid, o]));
+		let unique = [...byOid.values()];
+		let uploaded = 0;
+		let done = 0;
+
+		for (let i = 0; i < unique.length; i += GitLFS.BATCH_SIZE) {
+			let chunk = unique.slice(i, i + GitLFS.BATCH_SIZE);
+			let results = await this.batch('upload', chunk, ref);
+			for (let result of results) {
+				if (result.error) {
+					throw this._objectError(result);
+				}
+				cancel?.throwIfCancelled();
+				let local = byOid.get(result.oid);
+				let upload = result.actions?.upload;
+				if (local && upload) {
+					let response = await ZoteroGitHubSync.Files.uploadFile(upload.href, {
+						method: 'PUT',
+						path: local.path,
+						headers: { 'Content-Type': 'application/octet-stream', ...(upload.header || {}) },
+					});
+					if (!response.ok) {
+						throw new Error(`Git LFS upload of ${PathUtils.filename(local.path)} failed (${response.status})`);
+					}
+					let verify = result.actions?.verify;
+					if (verify) {
+						let verified = await fetch(verify.href, {
+							method: 'POST',
+							headers: {
+								Accept: 'application/vnd.git-lfs+json',
+								'Content-Type': 'application/vnd.git-lfs+json',
+								...(verify.header || {}),
+							},
+							body: JSON.stringify({ oid: local.oid, size: local.size }),
+						});
+						if (!verified.ok) {
+							throw new Error(`Git LFS could not verify ${PathUtils.filename(local.path)} (${verified.status})`);
+						}
+					}
+					uploaded++;
+				}
+				done++;
+				onProgress(done, unique.length);
+			}
+		}
+		return uploaded;
+	}
+
+
+	/**
+	 * @param {Object[]} objects - { oid, size, path } where path is the destination
+	 * @param {Object} [options]
+	 * @param {String} [options.ref]
+	 * @return {Promise<Object[]>} The objects that failed, with an `error` message
+	 */
+	async downloadAll(objects, { ref } = {}) {
+		let failed = [];
+		let byOid = new Map();
+		for (let object of objects) {
+			if (!byOid.has(object.oid)) {
+				byOid.set(object.oid, []);
+			}
+			byOid.get(object.oid).push(object);
+		}
+		let unique = [...byOid.values()].map(list => list[0]);
+
+		for (let i = 0; i < unique.length; i += GitLFS.BATCH_SIZE) {
+			let chunk = unique.slice(i, i + GitLFS.BATCH_SIZE);
+			let results = await this.batch('download', chunk, ref);
+			for (let result of results) {
+				let targets = byOid.get(result.oid) || [];
+				let download = result.actions?.download;
+				if (result.error || !download) {
+					let message = result.error ? this._objectError(result).message : 'no download action';
+					failed.push(...targets.map(t => ({ ...t, error: message })));
+					continue;
+				}
+				for (let target of targets) {
+					try {
+						await ZoteroGitHubSync.Files.downloadToFile(download.href, {
+							path: target.path,
+							headers: download.header || {},
+						});
+					}
+					catch (e) {
+						failed.push({ ...target, error: e.message || String(e) });
+					}
+				}
+			}
+		}
+		return failed;
 	}
 };

@@ -18,8 +18,9 @@ bootstrap.js            Zotero lifecycle hooks
 └── src/
     ├── core.js         namespace, init/shutdown, localized strings
     ├── utils.js        pure helpers, no Zotero or GitHub knowledge
+    ├── files.js        attachment files on disk: hashing, hash cache, transfers
     ├── prefs.js        preference access, token storage
-    ├── github.js       GitHub REST client
+    ├── github.js       GitHub REST client and Git LFS client
     ├── exporter.js     Zotero library -> repository files
     ├── importer.js     repository files -> Zotero library
     ├── sync.js         diffing, committing, scheduling
@@ -27,7 +28,7 @@ bootstrap.js            Zotero lifecycle hooks
 ```
 
 The dependency direction is one-way: `ui` and `sync` know about `exporter`, `importer`,
-`github` and `prefs`; those know about `utils`; `utils` knows about nothing. Nothing
+`github` and `prefs`; those know about `files` and `utils`; `utils` knows about nothing. Nothing
 depends on `ui`, which is why the plugin still works headlessly (a timer-driven sync
 needs no window).
 
@@ -42,20 +43,52 @@ One sync is `Sync.syncNow()` → `_runSyncWithRetry()` → `_runSync()`:
 1. **Guard.** Refuse if a sync is already running, if owner/repo/token are missing, or if
    a selection-scoped sync was handed an empty selection.
 2. **Export.** `Exporter.build()` walks the libraries and returns a
-   `Map<relativePath, {bytes}>`. Nothing has touched the network yet.
-3. **File list.** On a full sync, `.zotero-sync/files.json` is appended — the sorted list
-   of every path the plugin manages. This is what makes pruning safe (below).
-4. **Ensure the repository.** Create it if it is missing and the user allowed that.
-5. **Resolve the head.** Read the branch tip. A missing branch is created from the
+   `Map<relativePath, entry>`. Generated files (JSON, Markdown) are `{bytes}`. Attachment
+   files are `{source: {path, size, mtime}, lfs}` — nothing reads them yet. It also returns
+   *keep prefixes* for attachments whose file is not on this computer, and warnings for
+   files it had to skip. Nothing has touched the network yet.
+3. **Ensure the repository.** Create it if it is missing and the user allowed that.
+4. **Resolve the head.** Read the branch tip. A missing branch is created from the
    default branch; a completely empty repository means the first commit has no parent.
-6. **Diff.** Hash every exported file locally with Git's blob hash and compare against the
-   remote tree. Files whose hash already matches are skipped entirely.
-7. **Upload.** Create a blob per changed file, four at a time.
-8. **Commit.** Build tree entries (deletions are entries with `sha: null`), chunk them 200
-   at a time layering `base_tree`, create one commit, move the ref.
-9. **Record.** Write `lastSync`, `lastCommit`, clear `lastError`.
+5. **Keep.** Remote files under a keep prefix that the export didn't produce are marked
+   as kept: not uploaded, not deleted, still listed as managed.
+6. **File list.** On a full sync, `.zotero-sync/files.json` is appended — the sorted list
+   of every path the plugin manages, kept paths included. This is what makes pruning safe.
+7. **Diff.** Compute each file's Git blob hash and compare against the remote tree.
+   Generated files are hashed in memory. Attachment files come from the hash cache, or are
+   hashed from disk in 4 MB chunks. An LFS file's blob is its pointer, so its SHA-256 is
+   what gets cached and the pointer is hashed. Content that already exists anywhere in the
+   tree is not uploaded again.
+8. **LFS upload.** Objects for changed LFS pointers go to Git LFS through the batch API,
+   streamed from disk. This happens before any commit, so the branch never points at an
+   LFS object that isn't there.
+9. **Text in trees.** Every changed text file (item JSON, Markdown, pointers) is sent as
+   inline `content` in tree requests — up to 300 entries or 3 MB each — so thousands of
+   files cost a few dozen requests. On a first sync these are committed straight away.
+10. **Blobs in checkpoints.** Attachment files go up as blobs, three at a time below 8 MB
+    and one at a time above, each SHA checked against the local hash. Every 100 MB, 150
+    files or 5 minutes the pending entries become a commit and the branch moves.
+11. **Final commit.** Whatever is left, `files.json`, and the deletions.
+12. **Record.** Write `lastSync`, `lastCommit`, `lastWarnings`, clear `lastError`.
 
-If nothing changed and nothing needs deleting, step 7 onward is skipped and the sync ends
+### Rate limits
+
+GitHub allows 80 content-creating requests a minute per account. A `RateLimiter` shared by
+all syncs spaces POST/PUT/PATCH requests at 70 a minute. When GitHub still answers 403 or
+429 for rate limiting, the client waits for `retry-after`, for `x-ratelimit-reset`, or —
+with neither header — a minute doubling on each attempt, up to six attempts and fifteen
+minutes per wait. A 403 that isn't about rate limits is never retried. Every wait listens to
+the cancel token, so **Cancel** takes effect immediately.
+
+### Progress and cancellation
+
+`Sync.progress` holds the current phase, file and byte counts, and the end of any rate-limit
+wait. Every change calls `UI.onStatusChange()`, which updates the toolbar button (spinning
+icon, percentage label, tooltip) and the progress window; the settings pane polls it every
+second. `Sync.cancel()` trips a `CancelToken` checked between files and inside every wait;
+the sync then ends as `cancelled`, with any checkpoints already on the branch.
+
+If nothing changed and nothing needs deleting, step 8 onward is skipped and the sync ends
 as `up-to-date` — no commit, no empty history entry.
 
 ### Why the Git Data API
@@ -64,9 +97,10 @@ The obvious approach — the Contents API, one `PUT /repos/{owner}/{repo}/conten
 per file — produces one commit per file and one rate-limited request per file. Syncing a
 thousand-item library would mean thousands of commits.
 
-Blobs → tree → commit → ref instead produces exactly one commit no matter how many files
-changed, and costs one request per *changed* file plus a small constant. A sync that
-changes nothing costs three requests total.
+Blobs → tree → commit → ref instead produces one commit for an ordinary sync however many
+files changed — a large first sync adds a few checkpoint commits — and text files ride
+inside the tree requests, so only attachment files cost a request each. A sync that changes
+nothing costs three requests total, however many PDFs the library holds.
 
 ### Determinism is a correctness requirement
 
@@ -102,12 +136,51 @@ The list is also the reason partial syncs — selected items, a collection — n
 they are not authoritative about what the library contains, so they do not rewrite the
 list and do not delete.
 
+### Attachment files never sit in memory together
+
+Reading every PDF on every sync would make a 5 GB library cost 5 GB of RAM every few
+minutes. Instead:
+
+- `Files.cachedHash()` keeps a cache in `<profile>/zotero-github-sync/hash-cache.json`,
+  keyed on absolute path and validated by size and modification time. An unchanged file is
+  never opened again. A full sync drops entries for files it no longer exports.
+- Hashing reads 4 MB at a time into `nsICryptoHash`.
+- A file is read whole only when it is actually being uploaded as a Git blob, which the LFS
+  threshold caps at 95 MB, and large blobs upload one at a time.
+- LFS uploads pass a `File` as the `fetch()` body, so they stream from disk.
+
+The cache is safe to delete; it only costs rehashing. If a cached hash were ever wrong, the
+upload check in step 9 would catch it: GitHub's SHA for the received blob would not match.
+
+### Files that aren't on this computer
+
+With "download files as needed", Zotero on a given computer knows an attachment exists but
+has never downloaded it. Treating that as a deleted file would prune the copy another
+computer uploaded. The exporter marks such attachments with keep prefixes instead — both
+`attachments/<KE>/<KEY>/` and `attachments-lfs/<KE>/<KEY>/` — and whatever is there
+survives, still on the managed-file list, until the attachment itself is deleted.
+
+The same applies when attachment syncing or linked-file syncing is turned off: turning an
+option off stops uploads but doesn't delete what is already in the repository.
+
+### Git LFS
+
+`GitLFS` in `github.js` speaks the [batch API](https://github.com/git-lfs/git-lfs/blob/main/docs/api/batch.md)
+directly, with Basic auth (the account login and the personal access token). The LFS
+endpoint is derived from the API URL — `github.com/<owner>/<repo>.git/info/lfs` — and can
+be overridden with the `lfsURL` preference.
+
+The plugin writes exactly what git-lfs would: an uploaded object, a pointer blob in the
+tree, and a `.gitattributes` scoped to `attachments-lfs/`. Scoping it there means it can
+never collide with a `.gitattributes` the user keeps at the repository root.
+
 ### Retrying a moved branch
 
 If another machine syncs between reading the head and updating the ref, GitHub rejects the
-non-fast-forward update. `_runSyncWithRetry()` catches that (422/409) and redoes the sync
-once against the new head. The second pass is cheap: every blob it already uploaded is
-still there, so the diff finds almost nothing to send.
+non-fast-forward update. The ref update marks that error as `branchMoved`, and
+`_runSyncWithRetry()` redoes the sync once against the new head. No other 409 or 422 is
+retried. The second pass is cheap: every checkpoint already on the branch is skipped by the
+diff.
 
 ## Triggers and scheduling
 
@@ -119,8 +192,9 @@ scheduling preferences changes, so toggling a setting takes effect immediately.
 | --- | --- |
 | Toolbar button, menus | `command` listeners in `ui.js` |
 | Interval | `setInterval` at the configured minutes |
-| Library change | `Zotero.Notifier` observer on `item`, `collection`, `item-tag` |
+| Library change | `Zotero.Notifier` observer on `item`, `collection`, `collection-item`, `item-tag`, `search`, `setting` |
 | Startup | one `setTimeout`, one minute after `startup()` |
+| After Zotero's sync | `Zotero.Notifier` observer on `sync` / `finish` |
 
 The change observer does not sync on the notification. Editing a single item fires a
 stream of them, so it resets a debounce timer instead and syncs only once the user has
@@ -130,9 +204,10 @@ Two flags keep the observer from feeding itself: `_running` (a sync in progress 
 notifications) and `_suppressChangeTrigger` (set during an import, which writes to the
 library and would otherwise immediately trigger a push).
 
-Background syncs — interval, change, startup — pass `silent: true`. They open no progress
-window on success and surface only failures, as a passive notification rather than a modal
-alert.
+Background syncs — interval, change, startup, after Zotero's sync — pass `silent: true`.
+They open no progress window; the toolbar button shows them, and a failure appears as a
+passive notification. Nothing in the plugin opens a modal alert: on some window managers a
+modal dialog is drawn too small to dismiss and locks the application.
 
 ## Error handling
 
@@ -142,9 +217,10 @@ than echoing GitHub's generic text.
 
 Retries are narrow and bounded:
 
-- **403/429 with `Retry-After`, or 403 with an exhausted quota and a reset time** — wait
-  and retry, up to 90 seconds. Anything longer is reported instead of silently hanging.
-- **5xx** — one retry after two seconds.
+- **Rate limits** (403/429 with `retry-after`, an exhausted quota with a reset time, or a
+  "rate limit" message) — wait and retry, up to six times, as described under
+  [Rate limits](#rate-limits). The wait shows on the toolbar button and can be cancelled.
+- **5xx** — two retries, after two and four seconds.
 - **Everything else** — thrown immediately. A 401 will not fix itself.
 
 Blob uploads pass `logBodyLength: 0` so base64 payloads never reach the debug log.
@@ -156,19 +232,30 @@ Blob uploads pass `logBodyLength: 0` so base64 payloads never reach the debug lo
 - adds items the library does not have, matched by Zotero key;
 - refreshes items whose repository copy has a newer `dateModified`;
 - recreates missing collections first, so items land in the right place;
+- restores attachment files that are missing or have the wrong size;
+- adds missing saved searches and tag colors, never overwriting local ones;
 - **never deletes anything locally.**
 
 Worst case, a bug here costs a duplicate, not data. That asymmetry is the whole design.
 
-It strips `version` from imported JSON so Zotero's own sync treats the item as a local
-change, and drops references to parents and collections that do not exist locally rather
-than failing validation.
+Items are saved parents first — regular items, then their notes and attachments, then
+annotations and note images — and every item keeps its key, attachments included. That is
+what lets an annotation find its PDF and a note find its images. `version` is stripped so
+Zotero's own sync treats restored items as local changes, and references to parents and
+collections that do not exist locally are dropped rather than failing validation.
 
-Attachment *items* are not imported — an attachment item without its file is a permanently
-broken link in the library. Attachment *files* are re-imported under their parent through
-`Zotero.Attachments.importFromFile()` when the feature is enabled, which means they get
-fresh keys. Attachment keys are therefore not stable across an export/import round trip;
-item and collection keys are.
+Attachment files go into `storage/<KEY>/`, where Zotero's own file sync puts them. Blobs
+stream to disk from the raw blob endpoint; LFS files stream from the URLs the batch API
+hands out. Each download lands in a temporary file first, so a failure never leaves a
+truncated PDF. Files already present at the right size are skipped, which makes a second
+import cheap.
+
+A linked file whose path doesn't exist on the importing computer becomes a stored file,
+since a link to nothing is useless. A linked file that does resolve is left pointing at the
+user's own copy.
+
+Import reads one blob per top-level item, so a large library takes a while and uses a share
+of the hourly API quota; attachment files add one request each.
 
 ## Credentials
 

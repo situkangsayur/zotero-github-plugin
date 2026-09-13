@@ -3,11 +3,12 @@
 		"zotero-github-sync@situkangsayur.github.io": {
 			"updates": [
 				{
-					"version": "0.1.0",
-					"update_link": "https://github.com/situkangsayur/zotero-github-plugin/releases/download/v0.1.0/zotero-github-sync-0.1.0.xpi",
+					"version": "0.2.0",
+					"update_link": "https://github.com/situkangsayur/zotero-github-plugin/releases/download/v0.2.0/zotero-github-sync-0.2.0.xpi",
 					"applications": {
 						"zotero": {
-							"strict_min_version": "6.999"
+							"strict_min_version": "6.999",
+							"strict_max_version": "10.*"
 						}
 					}
 				}

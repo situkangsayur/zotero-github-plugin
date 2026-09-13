@@ -86,7 +86,13 @@ ZoteroGitHubSync.Prefs = {
 			exportIndex: !!this.get('exportIndex'),
 			includeNotes: !!this.get('includeNotes'),
 			includeAttachments: !!this.get('includeAttachments'),
+			includeLinkedFiles: !!this.get('includeLinkedFiles'),
 			maxAttachmentBytes: Math.max(0, Number(this.get('maxAttachmentMB')) || 0) * 1024 * 1024,
+			lfsEnabled: !!this.get('lfsEnabled'),
+			// Git objects are capped at 100 MB, and the blob API takes them as
+			// base64 JSON, so keep a margin below that
+			lfsThresholdBytes: Math.min(95, Math.max(1, Number(this.get('lfsThresholdMB')) || 50)) * 1024 * 1024,
+			lfsURL: (this.get('lfsURL') || '').trim(),
 			prune: !!this.get('prune'),
 
 			intervalEnabled: !!this.get('intervalEnabled'),
@@ -94,6 +100,7 @@ ZoteroGitHubSync.Prefs = {
 			syncOnChange: !!this.get('syncOnChange'),
 			changeDelayMinutes: Math.max(1, Number(this.get('changeDelayMinutes')) || 5),
 			syncOnStartup: !!this.get('syncOnStartup'),
+			syncAfterZoteroSync: !!this.get('syncAfterZoteroSync'),
 
 			commitMessage: this.get('commitMessage') || 'Zotero sync: {changes} ({date})',
 			authorName: (this.get('authorName') || '').trim(),
@@ -146,6 +153,30 @@ ZoteroGitHubSync.Prefs = {
 	},
 
 
+	/**
+	 * @param {Object} config - From getConfig()
+	 * @return {String} Git LFS API root for the configured repository
+	 */
+	getLFSURL(config) {
+		if (config.lfsURL) {
+			return config.lfsURL.replace(/\/+$/, '');
+		}
+		// api.github.com -> github.com; a GitHub Enterprise API URL looks like
+		// https://ghe.example.com/api/v3, whose Git host is the same host
+		let host = 'https://github.com';
+		try {
+			let url = new URL(config.apiURL);
+			if (url.hostname !== 'api.github.com') {
+				host = `${url.protocol}//${url.host}`;
+			}
+		}
+		catch (e) {
+			ZoteroGitHubSync.logError(e);
+		}
+		return `${host}/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}.git/info/lfs`;
+	},
+
+
 	// -- Token -------------------------------------------------------------
 
 	/**
@@ -170,7 +201,8 @@ ZoteroGitHubSync.Prefs = {
 
 		if (!token) {
 			if (existing) {
-				await Services.logins.removeLoginAsync(existing);
+				// The synchronous form: removeLoginAsync() doesn't exist in Zotero 10
+				Services.logins.removeLogin(existing);
 			}
 			this._tokenCache = '';
 			return;
@@ -191,7 +223,8 @@ ZoteroGitHubSync.Prefs = {
 			''
 		);
 		if (existing) {
-			await Services.logins.modifyLoginAsync(existing, loginInfo);
+			// The synchronous form: modifyLoginAsync() doesn't exist in Zotero 10
+			Services.logins.modifyLogin(existing, loginInfo);
 		}
 		else {
 			await Services.logins.addLoginAsync(loginInfo);

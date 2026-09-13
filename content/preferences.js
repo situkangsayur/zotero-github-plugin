@@ -33,7 +33,7 @@ window.ZoteroGitHubSyncPrefs = {
 		this.refreshStatus();
 		// The status block shows the result of syncs started from anywhere, so
 		// keep it current while the pane is open
-		this._statusTimer = setInterval(() => this.refreshStatus(), 3000);
+		this._statusTimer = setInterval(() => this.refreshStatus(), 1000);
 	},
 
 
@@ -111,11 +111,14 @@ window.ZoteroGitHubSyncPrefs = {
 
 			if (!repo) {
 				this._setTokenStatus(
-					`Signed in as ${user.login}. ${config.owner}/${config.repo} does not exist yet`
+					`Signed in as ${user.login}, but ${config.owner}/${config.repo} is not visible to this token. `
+					+ 'If the repository already exists, the token was not given access to it: on GitHub, '
+					+ 'edit the token, choose the repository under Repository access, and set Contents to '
+					+ 'Read and write. '
 					+ (config.autoCreateRepo
-						? ' -- it will be created on the first sync.'
-						: ' and automatic creation is turned off.'),
-					config.autoCreateRepo ? 'ok' : 'error'
+						? 'If it does not exist, the first sync will try to create it (that needs Administration: Read and write).'
+						: 'Automatic creation is turned off.'),
+					'error'
 				);
 				return;
 			}
@@ -156,6 +159,12 @@ window.ZoteroGitHubSyncPrefs = {
 	},
 
 
+	cancel() {
+		this.plugin.Sync.cancel();
+		this.refreshStatus();
+	},
+
+
 	openRepo() {
 		let url = this.plugin.Prefs.getRepoURL();
 		if (url) {
@@ -171,17 +180,26 @@ window.ZoteroGitHubSyncPrefs = {
 		let lastSync = prefs.get('lastSync');
 		let lastCommit = prefs.get('lastCommit');
 		let lastError = prefs.get('lastError');
+		let lastWarnings = prefs.get('lastWarnings');
 
 		let lines = [];
-		if (this.plugin.Sync.status === 'syncing') {
-			lines.push('Syncing…');
+		let sync = this.plugin.Sync;
+		let running = sync.isRunning;
+		if (running) {
+			lines.push(`Syncing: ${sync.describeProgress() || '…'}`, '');
 		}
+		document.getElementById('zgs-cancel').hidden = !running;
+		document.getElementById('zgs-sync-now').disabled = running;
+		document.getElementById('zgs-pull').disabled = running;
 		lines.push(lastSync ? `Last sync: ${lastSync}` : 'Never synced.');
 		if (lastCommit) {
 			lines.push(`Last commit: ${lastCommit.slice(0, 10)}`);
 		}
 		if (lastError) {
 			lines.push(`Last error: ${lastError}`);
+		}
+		if (lastWarnings) {
+			lines.push('Skipped or not restored:', ...lastWarnings.split('\n').map(line => `  ${line}`));
 		}
 
 		this._status.textContent = lines.join('\n');

@@ -96,29 +96,21 @@ and reloads every file in `src/`).
 
 ## Testing the pure logic outside Zotero
 
-Most of `utils.js`, plus the deterministic serializer, commit-message templating and the
-importer's tree grouping, are free of Zotero APIs and can be exercised under plain Node.
-`htmlToMarkdown()` needs a `DOMParser`, which Node does not have — `linkedom` is a
-drop-in for that:
+```bash
+npm test
+```
+
+`test/pure.test.mjs` loads `src/utils.js`, `src/exporter.js` and `src/importer.js` into
+Node with a stub namespace and checks what doesn't need Zotero: chunked base64 against
+Node's encoder, the Git blob hash, LFS pointers, sharding, JSON key sorting for objects from
+another realm, repository-tree grouping, and the parent-before-child import order. No
+dependencies.
+
+`htmlToMarkdown()` needs a `DOMParser`, which Node does not have; `linkedom` is a drop-in
+if you want to test it:
 
 ```bash
 mkdir -p /tmp/zgs-test && cd /tmp/zgs-test && npm install linkedom
-```
-
-```js
-// /tmp/zgs-test/t.mjs
-import { readFileSync } from 'node:fs';
-import { DOMParser } from 'linkedom';
-globalThis.DOMParser = DOMParser;
-globalThis.ZoteroGitHubSync = { log: () => {}, logError: console.error, version: '0.1.0' };
-
-const SRC = '/path/to/zotero-github-plugin/src';
-eval(readFileSync(`${SRC}/utils.js`, 'utf8'));
-eval(readFileSync(`${SRC}/exporter.js`, 'utf8'));
-
-const U = ZoteroGitHubSync.Utils;
-console.log(await U.gitBlobSha(U.encode('hello zotero\n')));
-console.log(U.htmlToMarkdown('<p>a <strong>b</strong></p>'));
 ```
 
 The blob hash is worth checking against Git itself, since the whole change-detection
@@ -128,8 +120,8 @@ scheme rests on it:
 printf 'hello zotero\n' | git hash-object --stdin
 ```
 
-Anything that touches `Zotero.Items`, `Zotero.Collections` or the DOM has to be exercised
-in the application.
+Anything that touches `Zotero.Items`, `IOUtils`, `nsICryptoHash`, `fetch` or the DOM has to
+be exercised in the application.
 
 ## Testing against GitHub
 
@@ -140,12 +132,26 @@ walking through at least once:
   path.
 - First sync into a repository that already has files — should add, never delete, because
   there is no `files.json` yet.
-- Second sync with nothing changed — must report *Already up to date* and create no
-  commit. If it commits, something in the export is non-deterministic.
-- Delete an item, sync — the files should disappear from the repository.
+- Second sync with nothing changed — must report *Already up to date*, create no commit,
+  and not re-read attachment files (the debug log shows no hashing). If it commits,
+  something in the export is non-deterministic.
+- A file over the LFS threshold — the tree gets a pointer under `attachments-lfs/`, and
+  `git lfs pull` in a clone fetches a file whose `sha256sum` matches the original.
+- A PDF with highlights, then *Import from GitHub* into a fresh profile — the highlights
+  appear on the restored PDF.
+- Delete an item, sync — its files should disappear from the repository.
+- Set "download files as needed" on a second computer where a file isn't downloaded, sync —
+  the file must stay in the repository.
 - Set the base path to empty (repository root) with an unrelated file present, delete an
   item, sync — the unrelated file must survive.
 - A branch that does not exist yet — should be created from the default branch.
+
+To test import without touching your real library, start Zotero with a separate profile
+and data directory (`zotero -P` to create one, then set its data directory under
+**Settings → Advanced → Files and Folders**).
+
+The attachment hash cache is `<profile>/zotero-github-sync/hash-cache.json`. Delete it to
+force every file to be rehashed.
 
 ## Adding things
 
@@ -170,6 +176,34 @@ deterministic, or every sync will commit. See
 Follows the Zotero codebase: tabs, `let` over `const` except for true constants, opening
 brace on the same line with `else`/`catch` on their own, and two hyphens rather than an em
 dash in comments. Comments explain why, not what.
+
+## Tutorial screenshots
+
+The images in `docs/images/` come from a real Zotero, not mockups, in a throwaway profile
+filled with sample papers. `scripts/screenshots/addon/` is a development-only plugin that,
+when `ZGS_SHOTS_DIR` is set, creates the sample library, puts the GitHub Sync UI into each
+state (idle, syncing, failed, settings, plugin manager), draws each window to a PNG and quits.
+It opens no ports.
+
+```bash
+# build both XPIs, copy them to the Zotero machine, then:
+scp build/zotero-github-sync-<version>.xpi host:zgs-demo/zotero-github-sync.xpi
+scp zgs-screenshots.xpi host:zgs-demo/zgs-screenshots.xpi   # zip of scripts/screenshots/addon
+ssh host 'bash -s' < scripts/screenshots/run-remote.sh
+```
+
+`run-remote.sh` creates `~/zgs-demo/{profile,data}`, runs Zotero headless twice (once to
+register the add-ons, once to take the pictures) and leaves the PNGs in `~/zgs-demo/shots`.
+The syncing screenshots show representative numbers; no sync runs. Crop them into
+`docs/images/` with ImageMagick.
+
+## Manifest requirements
+
+Zotero 10 refuses a plugin whose `manifest.json` lacks any of
+`applications.zotero.id`, `update_url` or `strict_max_version`, and shows only the generic
+"could not be installed" alert. A sideloaded XPI that fails the check is silently deleted
+from the profile's `extensions/` directory. Raise `strict_max_version` in `manifest.json`
+and `update.json` together when a new Zotero major version ships.
 
 ## Releasing
 

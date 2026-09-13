@@ -41,13 +41,21 @@ ZoteroGitHubSync.Utils = {
 	 */
 	toBase64(bytes) {
 		// btoa() takes a binary string, and String.fromCharCode() blows the
-		// argument limit on large files, so build it in chunks
+		// argument limit on large files, so build it in chunks. Blocks are a
+		// multiple of three bytes, so each encodes without padding and a 50 MB
+		// file never needs one 50 MB binary string alongside its base64.
+		const BLOCK = 3 * 1024 * 1024;
 		const CHUNK = 0x8000;
-		let parts = [];
-		for (let i = 0; i < bytes.length; i += CHUNK) {
-			parts.push(String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK)));
+		let out = [];
+		for (let start = 0; start < bytes.length; start += BLOCK) {
+			let block = bytes.subarray(start, Math.min(start + BLOCK, bytes.length));
+			let parts = [];
+			for (let i = 0; i < block.length; i += CHUNK) {
+				parts.push(String.fromCharCode.apply(null, block.subarray(i, i + CHUNK)));
+			}
+			out.push(btoa(parts.join('')));
 		}
-		return btoa(parts.join(''));
+		return out.join('');
 	},
 
 
@@ -62,6 +70,63 @@ ZoteroGitHubSync.Utils = {
 			bytes[i] = binary.charCodeAt(i);
 		}
 		return bytes;
+	},
+
+
+	/**
+	 * Two-character directory for a Zotero key. GitHub recommends no more than
+	 * 3,000 entries per directory; Zotero keys draw on 32 characters, so this
+	 * spreads a library over at most 1,024 directories.
+	 *
+	 * @param {String} key
+	 * @return {String}
+	 */
+	shard(key) {
+		return String(key).slice(0, 2);
+	},
+
+
+	/**
+	 * Directory for a Markdown note: the first letter of its title, so the notes
+	 * folder stays browsable by hand.
+	 *
+	 * @param {String} filename
+	 * @return {String} A-Z, "0-9" or "other"
+	 */
+	letterShard(filename) {
+		let first = String(filename || '').normalize('NFD').charAt(0).toUpperCase();
+		if (/[A-Z]/.test(first)) {
+			return first;
+		}
+		if (/[0-9]/.test(first)) {
+			return '0-9';
+		}
+		return 'other';
+	},
+
+
+	/**
+	 * @param {String} oid - SHA-256 hex
+	 * @param {Number} size
+	 * @return {String} A Git LFS pointer file
+	 */
+	lfsPointer(oid, size) {
+		return `version https://git-lfs.github.com/spec/v1\noid sha256:${oid}\nsize ${size}\n`;
+	},
+
+
+	/**
+	 * @param {String} text
+	 * @return {{oid: String, size: Number}|null}
+	 */
+	parseLFSPointer(text) {
+		let str = String(text || '');
+		if (str.length > 512 || !str.startsWith('version https://git-lfs.github.com/spec/')) {
+			return null;
+		}
+		let oid = str.match(/^oid sha256:([0-9a-f]{64})$/m);
+		let size = str.match(/^size (\d+)$/m);
+		return oid && size ? { oid: oid[1], size: Number(size[1]) } : null;
 	},
 
 
@@ -159,9 +224,12 @@ ZoteroGitHubSync.Utils = {
 	 * never disappears just because it used an unexpected element.
 	 *
 	 * @param {String} html
+	 * @param {Object} [options]
+	 * @param {Function} [options.resolveImage] - (attachmentKey) => relative link
+	 * 		or null, for images Zotero embeds in notes
 	 * @return {String}
 	 */
-	htmlToMarkdown(html) {
+	htmlToMarkdown(html, { resolveImage = null } = {}) {
 		if (!html) {
 			return '';
 		}
@@ -177,7 +245,7 @@ ZoteroGitHubSync.Utils = {
 		if (!root) {
 			return String(html).replace(/<[^>]+>/g, '');
 		}
-		let out = this._nodeToMarkdown(root, { listStack: [] });
+		let out = this._nodeToMarkdown(root, { listStack: [], resolveImage });
 		return out
 			.replace(/[ \t]+\n/g, '\n')
 			.replace(/\n{3,}/g, '\n\n')
@@ -238,9 +306,15 @@ ZoteroGitHubSync.Utils = {
 			case 'img': {
 				let src = node.getAttribute('src') || '';
 				let alt = node.getAttribute('alt') || 'image';
-				// Notes embed images as data: URIs, and a full base64 blob would
-				// make the Markdown unreadable, so leave a marker instead
-				return src.startsWith('data:') ? '`[embedded image]`' : `![${alt}](${src})`;
+				// Zotero 7 notes point at an embedded-image attachment by key; link
+				// to the file the exporter wrote for it when there is one
+				let attachmentKey = node.getAttribute('data-attachment-key');
+				let link = attachmentKey && ctx.resolveImage ? ctx.resolveImage(attachmentKey) : null;
+				if (link) {
+					return `![${alt}](${link})`;
+				}
+				// A full base64 data: URI would make the Markdown unreadable
+				return src.startsWith('data:') || !src ? '`[embedded image]`' : `![${alt}](${src})`;
 			}
 			case 'ul': case 'ol': {
 				ctx.listStack.push({ type: tag, index: 0 });
@@ -296,16 +370,24 @@ ZoteroGitHubSync.Utils = {
 	async pMap(items, fn, concurrency = 4) {
 		let results = new Array(items.length);
 		let next = 0;
+		let failed = false;
 		let workers = [];
 		let workerCount = Math.max(1, Math.min(concurrency, items.length));
 		for (let i = 0; i < workerCount; i++) {
 			workers.push((async () => {
-				while (true) {
+				// Once one call fails the whole map fails, so stop starting new ones
+				while (!failed) {
 					let index = next++;
 					if (index >= items.length) {
 						return;
 					}
-					results[index] = await fn(items[index], index);
+					try {
+						results[index] = await fn(items[index], index);
+					}
+					catch (e) {
+						failed = true;
+						throw e;
+					}
 				}
 			})());
 		}
@@ -341,4 +423,118 @@ ZoteroGitHubSync.Utils = {
 		}
 		return `${value.toFixed(unit === 0 ? 0 : 1)} ${UNITS[unit]}`;
 	},
+};
+
+
+/**
+ * Thrown when the user cancels a sync. Not an error worth reporting as one.
+ */
+ZoteroGitHubSync.CancelledError = class CancelledError extends Error {
+	constructor(message = 'Sync cancelled') {
+		super(message);
+		this.name = 'CancelledError';
+	}
+};
+
+
+/**
+ * A cancellation flag that long waits can listen to, so pressing Cancel during
+ * a one-minute rate-limit pause takes effect immediately rather than after it.
+ */
+ZoteroGitHubSync.CancelToken = class CancelToken {
+	constructor() {
+		this.cancelled = false;
+		this._listeners = new Set();
+	}
+
+
+	cancel() {
+		if (this.cancelled) {
+			return;
+		}
+		this.cancelled = true;
+		for (let listener of this._listeners) {
+			listener();
+		}
+		this._listeners.clear();
+	}
+
+
+	throwIfCancelled() {
+		if (this.cancelled) {
+			throw new ZoteroGitHubSync.CancelledError();
+		}
+	}
+
+
+	/**
+	 * @param {Number} ms
+	 * @return {Promise<void>} Rejects with CancelledError if cancelled first
+	 */
+	sleep(ms) {
+		this.throwIfCancelled();
+		return new Promise((resolve, reject) => {
+			let onCancel = () => {
+				clearTimeout(timer);
+				reject(new ZoteroGitHubSync.CancelledError());
+			};
+			let timer = setTimeout(() => {
+				this._listeners.delete(onCancel);
+				resolve();
+			}, ms);
+			this._listeners.add(onCancel);
+		});
+	}
+};
+
+
+/**
+ * Sliding-window limiter for GitHub's secondary rate limits. GitHub allows 80
+ * content-creating requests a minute; staying under that is far cheaper than
+ * hitting the limit and sitting out the penalty.
+ */
+ZoteroGitHubSync.RateLimiter = class RateLimiter {
+	/**
+	 * @param {Object[]} windows - [{ ms, max }]
+	 */
+	constructor(windows) {
+		this.windows = windows;
+		this._stamps = [];
+		this._longest = Math.max(...windows.map(w => w.ms));
+	}
+
+
+	/**
+	 * Wait until a request is allowed, then record it.
+	 *
+	 * @param {Object} [options]
+	 * @param {ZoteroGitHubSync.CancelToken} [options.cancel]
+	 * @param {Function} [options.onWait] - Called with the time waiting ends
+	 */
+	async acquire({ cancel = null, onWait = null } = {}) {
+		while (true) {
+			let now = Date.now();
+			while (this._stamps.length && now - this._stamps[0] >= this._longest) {
+				this._stamps.shift();
+			}
+			let waitMs = 0;
+			for (let { ms, max } of this.windows) {
+				let inWindow = this._stamps.filter(t => now - t < ms);
+				if (inWindow.length >= max) {
+					waitMs = Math.max(waitMs, inWindow[0] + ms - now + 25);
+				}
+			}
+			if (!waitMs) {
+				this._stamps.push(now);
+				return;
+			}
+			onWait?.(now + waitMs);
+			if (cancel) {
+				await cancel.sleep(waitMs);
+			}
+			else {
+				await new Promise(resolve => setTimeout(resolve, waitMs));
+			}
+		}
+	}
 };

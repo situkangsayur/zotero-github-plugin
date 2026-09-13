@@ -1,9 +1,12 @@
 /* Zotero GitHub Sync -- read a synced repository back into Zotero
  *
  * This is the "new laptop" direction, not a second sync engine: it adds items
- * the local library doesn't have and refreshes ones whose repository copy is
- * newer. It never deletes anything locally, so a mistake here costs a duplicate
- * at worst, not data.
+ * the local library doesn't have, refreshes ones whose repository copy is newer,
+ * and puts back attachment files that are missing on disk. It never deletes
+ * anything locally, so a mistake here costs a duplicate at worst, not data.
+ *
+ * Items keep their keys, attachments included, which is what lets annotations
+ * and note images find their parents again.
  */
 
 ZoteroGitHubSync.Importer = {
@@ -15,14 +18,15 @@ ZoteroGitHubSync.Importer = {
 	 * @param {Object} options.config
 	 * @param {String} options.token
 	 * @param {Function} [options.onProgress]
-	 * @return {Promise<Object>} { status, created, updated, skipped, attachments }
+	 * @return {Promise<Object>} { status, created, updated, skipped, files, failures }
 	 */
-	async run({ config, token, onProgress = () => {} }) {
+	async run({ config, token, cancel = null, onProgress = () => {} }) {
 		let client = new ZoteroGitHubSync.GitHub({
 			token,
 			apiURL: config.apiURL,
 			owner: config.owner,
 			repo: config.repo,
+			cancel,
 		});
 
 		let head = await client.getBranchHead(config.branch);
@@ -34,19 +38,26 @@ ZoteroGitHubSync.Importer = {
 		let commit = await client.getCommit(head);
 		let remoteFiles = await client.listTree(commit.tree.sha);
 
-		let libraries = this._groupByLibrary(remoteFiles, config);
+		let libraries = this.groupByLibrary(remoteFiles, config);
 		if (!libraries.size) {
 			throw new Error(
 				'No Zotero data found in the repository. Check the base path setting.'
 			);
 		}
 
-		let totals = { status: 'ok', created: 0, updated: 0, skipped: 0, attachments: 0 };
+		let totals = { status: 'ok', created: 0, updated: 0, skipped: 0, files: 0, failures: [] };
+		let ctx = { client, config, token, head, totals, onProgress, lfs: null };
 
 		for (let [dir, group] of libraries) {
+			cancel?.throwIfCancelled();
 			let libraryID = this._resolveLibraryID(dir);
 			if (libraryID === null) {
 				ZoteroGitHubSync.log(`Skipping ${dir}: no matching local library`);
+				totals.skipped += group.items.length;
+				continue;
+			}
+			if (!Zotero.Libraries.get(libraryID)?.editable) {
+				ZoteroGitHubSync.log(`Skipping ${dir}: library is read-only`);
 				totals.skipped += group.items.length;
 				continue;
 			}
@@ -57,36 +68,51 @@ ZoteroGitHubSync.Importer = {
 			}
 
 			let records = await this._fetchItemRecords({ client, entries: group.items, onProgress });
-			let result = await this._importItems({ records, libraryID });
+			let result = await this._importItems({ records, libraryID, group, onProgress });
 			totals.created += result.created;
 			totals.updated += result.updated;
 			totals.skipped += result.skipped;
 
-			if (config.includeAttachments && group.attachments.length) {
-				onProgress('Restoring attachments…');
-				totals.attachments += await this._importAttachments({
-					client,
-					entries: group.attachments,
-					libraryID,
-					attachmentParents: this._mapAttachmentParents(records),
-				});
+			if (config.includeAttachments && group.files.size) {
+				onProgress(ZoteroGitHubSync.getString('progress.restoring'));
+				totals.files += await this._restoreFiles({ ctx, group, libraryID });
+			}
+
+			if (group.searches) {
+				await this._importSearches({ client, entry: group.searches, libraryID });
+			}
+			if (group.settings) {
+				await this._importSettings({ client, entry: group.settings, libraryID });
 			}
 		}
 
+		if (totals.failures.length) {
+			totals.failures.forEach(f => ZoteroGitHubSync.warn(f));
+		}
 		return totals;
 	},
 
 
 	/**
-	 * @return {Map<String, {collections: Object, items: Object[], attachments: Object[]}>}
+	 * @return {Map<String, Object>} library directory -> {
+	 * 		collections, searches, settings: tree entries or null,
+	 * 		items: [{ key, sha }],
+	 * 		files: Map<attachmentKey, [{ name, sha, size, lfs }]>
+	 * 	}
 	 */
-	_groupByLibrary(remoteFiles, config) {
+	groupByLibrary(remoteFiles, config) {
 		let prefix = config.basePath ? `${config.basePath}/` : '';
 		let libraries = new Map();
 
 		let group = (dir) => {
 			if (!libraries.has(dir)) {
-				libraries.set(dir, { collections: null, items: [], attachments: [] });
+				libraries.set(dir, {
+					collections: null,
+					searches: null,
+					settings: null,
+					items: [],
+					files: new Map(),
+				});
 			}
 			return libraries.get(dir);
 		};
@@ -96,23 +122,29 @@ ZoteroGitHubSync.Importer = {
 				continue;
 			}
 			let rel = path.slice(prefix.length);
-			let itemMatch = rel.match(/^([^/]+)\/items\/([A-Z0-9]+)\.json$/);
+
+			// Sharded (items/AB/ABCD1234.json) and flat layouts both read back
+			let itemMatch = rel.match(/^([^/]+)\/items\/(?:[A-Z0-9]{2}\/)?([A-Z0-9]{8})\.json$/);
 			if (itemMatch) {
 				group(itemMatch[1]).items.push({ key: itemMatch[2], sha: entry.sha });
 				continue;
 			}
-			let collectionsMatch = rel.match(/^([^/]+)\/collections\.json$/);
-			if (collectionsMatch) {
-				group(collectionsMatch[1]).collections = { sha: entry.sha };
+			let libraryFileMatch = rel.match(/^([^/]+)\/(collections|searches|settings)\.json$/);
+			if (libraryFileMatch) {
+				group(libraryFileMatch[1])[libraryFileMatch[2]] = { sha: entry.sha };
 				continue;
 			}
-			let attachmentMatch = rel.match(/^([^/]+)\/attachments\/([A-Z0-9]+)\/(.+)$/);
-			if (attachmentMatch) {
-				group(attachmentMatch[1]).attachments.push({
-					key: attachmentMatch[2],
-					filename: attachmentMatch[3],
+			let fileMatch = rel.match(/^([^/]+)\/(attachments|attachments-lfs)\/(?:[A-Z0-9]{2}\/)?([A-Z0-9]{8})\/(.+)$/);
+			if (fileMatch) {
+				let files = group(fileMatch[1]).files;
+				if (!files.has(fileMatch[3])) {
+					files.set(fileMatch[3], []);
+				}
+				files.get(fileMatch[3]).push({
+					name: fileMatch[4],
 					sha: entry.sha,
 					size: entry.size,
+					lfs: fileMatch[2] === 'attachments-lfs',
 				});
 			}
 		}
@@ -151,8 +183,7 @@ ZoteroGitHubSync.Importer = {
 
 
 	async _readJSON(client, sha) {
-		let bytes = await client.getBlobBytes(sha);
-		return JSON.parse(ZoteroGitHubSync.Utils.textDecoder.decode(bytes));
+		return JSON.parse(await client.getBlobText(sha));
 	},
 
 
@@ -224,6 +255,9 @@ ZoteroGitHubSync.Importer = {
 					return { key: entry.key, data };
 				}
 				catch (e) {
+					if (e instanceof ZoteroGitHubSync.CancelledError) {
+						throw e;
+					}
 					ZoteroGitHubSync.logError(e);
 					return null;
 				}
@@ -234,57 +268,78 @@ ZoteroGitHubSync.Importer = {
 	},
 
 
-	async _importItems({ records, libraryID }) {
+	/**
+	 * Every item JSON in the records, parents before children: regular items
+	 * and standalone notes/attachments, then child notes and attachments, then
+	 * annotations and note images.
+	 *
+	 * @return {Object[]} Zotero API JSON
+	 */
+	flattenRecords(records) {
+		let byKey = new Map();
+		for (let record of records) {
+			let data = record.data;
+			for (let json of [data?.zotero, ...(Array.isArray(data?.children) ? data.children : [])]) {
+				if (json?.itemType && json.key && !byKey.has(json.key)) {
+					byKey.set(json.key, json);
+				}
+			}
+		}
+		let depthCache = new Map();
+		let depth = (json, seen = new Set()) => {
+			if (depthCache.has(json.key)) {
+				return depthCache.get(json.key);
+			}
+			let parent = json.parentItem ? byKey.get(json.parentItem) : null;
+			let value = parent && !seen.has(parent.key)
+				? depth(parent, seen.add(json.key)) + 1
+				: 0;
+			depthCache.set(json.key, value);
+			return value;
+		};
+		return [...byKey.values()]
+			.map(json => ({ json, depth: depth(json) }))
+			.sort((a, b) => a.depth - b.depth || (a.json.key < b.json.key ? -1 : 1))
+			.map(entry => entry.json);
+	},
+
+
+	async _importItems({ records, libraryID, group, onProgress }) {
 		let created = 0;
 		let updated = 0;
 		let skipped = 0;
+		let all = this.flattenRecords(records);
 
-		// A child item can't be saved before its parent exists
-		let ordered = records.slice().sort((a, b) => {
-			let aChild = a.data?.zotero?.parentItem ? 1 : 0;
-			let bChild = b.data?.zotero?.parentItem ? 1 : 0;
-			return aChild - bChild;
-		});
-
-		for (let record of ordered) {
-			let json = record.data?.zotero;
-			if (!json?.itemType) {
-				skipped++;
-				continue;
-			}
-			// Attachment files are restored separately; importing the item alone
-			// would leave a permanently broken link in the library
-			if (json.itemType === 'attachment') {
-				skipped++;
-				continue;
-			}
-
+		for (let json of all) {
 			try {
-				let existing = Zotero.Items.getByLibraryAndKey(libraryID, record.key);
+				let existing = Zotero.Items.getByLibraryAndKey(libraryID, json.key);
 				if (existing) {
 					if (!this._remoteIsNewer(json, existing)) {
 						skipped++;
 						continue;
 					}
-					existing.fromJSON(this._prepareJSON(json, libraryID));
+					existing.fromJSON(this._prepareJSON(json, libraryID, group));
 					await existing.saveTx({ skipSelect: true });
 					updated++;
 				}
 				else {
 					let item = new Zotero.Item();
 					item.libraryID = libraryID;
-					item.key = record.key;
+					item.key = json.key;
 					await item.loadPrimaryData();
-					item.fromJSON(this._prepareJSON(json, libraryID));
+					item.fromJSON(this._prepareJSON(json, libraryID, group, { isNew: true }));
 					await item.saveTx({ skipSelect: true, skipCache: true });
 					created++;
 				}
 			}
 			catch (e) {
 				ZoteroGitHubSync.logError(
-					new Error(`Failed to import item ${record.key}: ${e.message || e}`)
+					new Error(`Failed to import item ${json.key}: ${e.message || e}`)
 				);
 				skipped++;
+			}
+			if ((created + updated + skipped) % 100 === 0) {
+				onProgress(`Imported ${created + updated + skipped}/${all.length} items…`);
 			}
 		}
 
@@ -297,10 +352,12 @@ ZoteroGitHubSync.Importer = {
 	 * this library: `version` is Zotero-server bookkeeping, and a parent or
 	 * collection we don't have locally would fail validation.
 	 */
-	_prepareJSON(json, libraryID) {
+	_prepareJSON(json, libraryID, group, { isNew = false } = {}) {
 		let prepared = { ...json };
 		delete prepared.version;
 		delete prepared.key;
+		delete prepared.mtime;
+		delete prepared.md5;
 
 		if (prepared.parentItem && !Zotero.Items.getByLibraryAndKey(libraryID, prepared.parentItem)) {
 			delete prepared.parentItem;
@@ -310,7 +367,35 @@ ZoteroGitHubSync.Importer = {
 				key => Zotero.Collections.getByLibraryAndKey(libraryID, key)
 			);
 		}
+
+		// A linked file whose path doesn't exist on this computer would be a
+		// broken link. If the repository has the file, bring it in as a stored
+		// file instead.
+		if (isNew && prepared.itemType === 'attachment' && prepared.linkMode === 'linked_file') {
+			let repoFiles = group.files.get(json.key);
+			if (repoFiles?.length && !this._linkedPathExists(prepared.path)) {
+				prepared.linkMode = 'imported_file';
+				prepared.filename = repoFiles[0].name.split('/').pop();
+				delete prepared.path;
+			}
+		}
 		return prepared;
+	},
+
+
+	_linkedPathExists(path) {
+		try {
+			if (!path) {
+				return false;
+			}
+			let resolved = path.startsWith('attachments:')
+				? Zotero.Attachments.resolveRelativePath(path)
+				: path;
+			return !!resolved && Zotero.File.pathToFile(resolved).exists();
+		}
+		catch (e) {
+			return false;
+		}
 	},
 
 
@@ -325,86 +410,127 @@ ZoteroGitHubSync.Importer = {
 
 
 	/**
-	 * Download attachment files whose parent item exists locally and that aren't
-	 * already attached under the same filename.
+	 * Put attachment files back into Zotero's storage directory, the same place
+	 * Zotero's own file sync writes them. Files already present with the right
+	 * size are left alone, so running an import twice costs nothing.
 	 *
-	 * @return {Promise<Number>} Number of files imported
+	 * @return {Promise<Number>} Files written
 	 */
-	async _importAttachments({ client, entries, libraryID, attachmentParents }) {
-		let imported = 0;
-		let tempDir = Zotero.getTempDirectory().path;
+	async _restoreFiles({ ctx, group, libraryID }) {
+		let { client, config, totals } = ctx;
+		let written = 0;
+		let lfsTargets = [];
 
-		for (let entry of entries) {
-			try {
-				// The key in the path is the exported attachment's own key; its
-				// parent comes from the exported item metadata
-				let existing = Zotero.Items.getByLibraryAndKey(libraryID, entry.key);
-				if (existing) {
-					continue;
-				}
-				let parentKey = attachmentParents.get(entry.key);
-				let parentItem = parentKey
-					? Zotero.Items.getByLibraryAndKey(libraryID, parentKey)
-					: null;
-				if (!parentItem) {
-					continue;
-				}
-				if (await this._parentHasFile(parentItem, entry.filename)) {
-					continue;
-				}
+		for (let [key, entries] of group.files) {
+			let attachment = Zotero.Items.getByLibraryAndKey(libraryID, key);
+			if (!attachment || !attachment.isFileAttachment()) {
+				continue;
+			}
+			if (attachment.isLinkedFileAttachment()) {
+				// A linked file that resolves here is the user's own copy
+				continue;
+			}
+			let storageDir = Zotero.Attachments.getStorageDirectory(attachment).path;
 
-				let bytes = await client.getBlobBytes(entry.sha);
-				let tempPath = PathUtils.join(
-					tempDir,
-					`zgs-${entry.key}-${ZoteroGitHubSync.Utils.sanitizeSegment(entry.filename, 100)}`
-				);
-				await IOUtils.write(tempPath, bytes, { tmpPath: `${tempPath}.tmp` });
+			for (let entry of entries) {
+				let target = PathUtils.join(storageDir, ...entry.name.split('/'));
 				try {
-					await Zotero.Attachments.importFromFile({
-						file: tempPath,
-						parentItemID: parentItem.id,
-						title: entry.filename,
-					});
-					imported++;
+					if (!entry.lfs) {
+						let stat = await ZoteroGitHubSync.Files.statFile(target);
+						if (stat && stat.size === entry.size) {
+							continue;
+						}
+						await client.downloadBlob(entry.sha, target);
+						written++;
+						continue;
+					}
+					// LFS: the tree holds a pointer; read it for the object ID
+					let pointer = ZoteroGitHubSync.Utils.parseLFSPointer(await client.getBlobText(entry.sha));
+					if (!pointer) {
+						totals.failures.push(`${key}/${entry.name}: not a valid Git LFS pointer`);
+						continue;
+					}
+					let stat = await ZoteroGitHubSync.Files.statFile(target);
+					if (stat && stat.size === pointer.size) {
+						continue;
+					}
+					lfsTargets.push({ ...pointer, path: target, label: `${key}/${entry.name}` });
 				}
-				finally {
-					await IOUtils.remove(tempPath, { ignoreAbsent: true });
+				catch (e) {
+					totals.failures.push(`${key}/${entry.name}: ${e.message || e}`);
 				}
+			}
+		}
+
+		if (lfsTargets.length) {
+			if (!ctx.lfs) {
+				ctx.lfs = await ZoteroGitHubSync.Sync._lfsClient(client, config, ctx.token);
+			}
+			let failed = await ctx.lfs.downloadAll(lfsTargets, { ref: `refs/heads/${config.branch}` });
+			written += lfsTargets.length - failed.length;
+			for (let failure of failed) {
+				totals.failures.push(`${failure.label}: ${failure.error}`);
+			}
+		}
+		return written;
+	},
+
+
+	async _importSearches({ client, entry, libraryID }) {
+		let searches;
+		try {
+			searches = await this._readJSON(client, entry.sha);
+		}
+		catch (e) {
+			ZoteroGitHubSync.logError(e);
+			return;
+		}
+		for (let json of Array.isArray(searches) ? searches : []) {
+			if (!json?.key || Zotero.Searches.getByLibraryAndKey(libraryID, json.key)) {
+				continue;
+			}
+			try {
+				let search = new Zotero.Search();
+				search.libraryID = libraryID;
+				search.key = json.key;
+				await search.loadPrimaryData();
+				let prepared = { ...json };
+				delete prepared.key;
+				delete prepared.version;
+				search.fromJSON(prepared);
+				await search.saveTx();
 			}
 			catch (e) {
-				ZoteroGitHubSync.logError(e);
+				ZoteroGitHubSync.logError(new Error(`Failed to import saved search ${json.key}: ${e.message || e}`));
 			}
 		}
-		return imported;
 	},
 
 
-	/**
-	 * Attachment items themselves are not imported, so the link back to a parent
-	 * comes from the `meta.attachments` list the exporter writes on each item.
-	 *
-	 * @return {Map<String, String>} attachment key -> parent item key
-	 */
-	_mapAttachmentParents(records) {
-		let parents = new Map();
-		for (let record of records) {
-			for (let attachment of record.data?.meta?.attachments || []) {
-				if (attachment?.key) {
-					parents.set(attachment.key, record.key);
-				}
+	async _importSettings({ client, entry, libraryID }) {
+		let settings;
+		try {
+			settings = await this._readJSON(client, entry.sha);
+		}
+		catch (e) {
+			ZoteroGitHubSync.logError(e);
+			return;
+		}
+		let remoteColors = Array.isArray(settings?.tagColors) ? settings.tagColors : [];
+		if (!remoteColors.length) {
+			return;
+		}
+		try {
+			// Merge rather than replace: a color the user set locally wins
+			let local = Zotero.SyncedSettings.get(libraryID, 'tagColors') || [];
+			let names = new Set(local.map(c => c.name));
+			let merged = [...local, ...remoteColors.filter(c => c?.name && !names.has(c.name))];
+			if (merged.length !== local.length) {
+				await Zotero.SyncedSettings.set(libraryID, 'tagColors', merged);
 			}
 		}
-		return parents;
-	},
-
-
-	async _parentHasFile(parentItem, filename) {
-		for (let id of parentItem.getAttachments(false)) {
-			let attachment = await Zotero.Items.getAsync(id);
-			if (attachment?.attachmentFilename === filename) {
-				return true;
-			}
+		catch (e) {
+			ZoteroGitHubSync.logError(e);
 		}
-		return false;
 	},
 };

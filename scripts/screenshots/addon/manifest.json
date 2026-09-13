@@ -1,0 +1,14 @@
+{
+	"manifest_version": 2,
+	"name": "Zotero GitHub Sync -- Tutorial Screenshots",
+	"version": "0.0.1",
+	"description": "DEVELOPMENT ONLY. Fills a throwaway profile with sample data, captures the screenshots used in docs/TUTORIAL.md, and quits Zotero. Never install in a real profile.",
+	"applications": {
+		"zotero": {
+			"id": "zgs-screenshots@situkangsayur.github.io",
+			"update_url": "https://example.invalid/none.json",
+			"strict_min_version": "6.999",
+			"strict_max_version": "10.*"
+		}
+	}
+}
