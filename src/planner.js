@@ -53,11 +53,13 @@ ZoteroGitHubSync.Planner = {
 	 * 		ignores paths it didn't export
 	 * @param {Set<String>} [options.managed] - Paths the plugin is allowed to touch
 	 * 		on the server (from files.json); deletions are limited to these
+	 * @param {Boolean} [options.prune=true] - Remove a file from the server when its
+	 * 		item is deleted here; off, deleted items' files stay on the server
 	 * @return {Object} Arrays of relPaths by action: {
 	 * 		push, delete, incoming, conflicts, overwrite, restore, diverged, unchanged
 	 * 	}
 	 */
-	plan({ local, remote, base, kept = new Set(), fullSync = true, managed = null }) {
+	plan({ local, remote, base, kept = new Set(), fullSync = true, managed = null, prune = true }) {
 		let plan = {
 			// Local change, server untouched since the last sync: upload
 			push: [],
@@ -103,7 +105,7 @@ ZoteroGitHubSync.Planner = {
 				}
 				else if (b !== undefined && r === b) {
 					// We had it at the last sync and it's gone here now
-					if (!managed || managed.has(path)) {
+					if (prune && (!managed || managed.has(path))) {
 						plan.delete.push(path);
 					}
 					else {

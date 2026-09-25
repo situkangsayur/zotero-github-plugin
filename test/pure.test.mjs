@@ -143,6 +143,11 @@ assert.equal(P.importable(MD('Title (ABCD1234)')), null);
 	assert.deepEqual(plan.restore, [ITEM('FFFFFFFF')]);
 	assert.ok(plan.unchanged.includes(FILE('KKKKKKKK', 'x.pdf')));
 	assert.ok(P.needsReview(plan));
+	// prune off: a file whose item is gone here stays on the server
+	const noPrune = P.plan({ local, remote, base, kept: new Set([FILE('KKKKKKKK', 'x.pdf')]), prune: false });
+	assert.deepEqual(noPrune.delete, []);
+	assert.ok(noPrune.unchanged.includes(ITEM('EEEEEEEE')));
+	assert.deepEqual(noPrune.push, [ITEM('BBBBBBBB'), ITEM('NNNNNNNN')]);
 
 	// After a sync that skipped the undecided paths, they keep their old base
 	const undecided = new Set([...plan.incoming, ...plan.conflicts, ...plan.overwrite, ...plan.restore]);
@@ -197,4 +202,11 @@ assert.equal(P.importable(MD('Title (ABCD1234)')), null);
 	});
 	assert.deepEqual(plan.delete, [ITEM('AAAAAAAA')]);
 }
+// -- Importer: repository paths may not leave the attachment folder ----------
+assert.deepEqual(I.safeSegments('paper.pdf'), ['paper.pdf']);
+assert.deepEqual(I.safeSegments('snapshot/index.html'), ['snapshot', 'index.html']);
+for (const bad of ['../evil.txt', 'a/../../evil.txt', './x', 'a//b', '', 'a/', 'a\\..\\b']) {
+  assert.equal(I.safeSegments(bad), null, `escapes: ${bad}`);
+}
+
 console.log('all pure-logic tests passed');

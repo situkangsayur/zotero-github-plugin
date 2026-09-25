@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] — 2026-09-25
+
+### Fixed
+
+- **The "Remove files from the repository when their items are deleted" preference did nothing.**
+  It was read but never used, so a full sync deleted files on the server even with the box
+  unchecked. The planner now honours it: with pruning off, files whose items are gone here stay
+  on the server and are counted as unchanged. Reported by a reader of the source.
+- **Repository paths are checked before they become local paths.** A file path from the Git tree
+  was joined onto the attachment's storage folder as-is; a component of `.`, `..` or an empty
+  segment could have written outside that folder. Git does not normally allow such a tree, but
+  the path comes from the server, so each segment is now validated and a bad one is reported as
+  a failure instead of written.
+- **"Keep both" could lose the other files of a multi-file attachment.** After importing the
+  repository's copy, the plugin deleted its temporary folder recursively -- and a web snapshot's
+  files share one temporary folder, so the files not yet imported went with it. The folder is
+  now removed once, after every copy has been imported.
+
 ## [0.3.1] — 2026-09-14
 
 ### Fixed

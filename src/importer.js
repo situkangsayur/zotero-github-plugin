@@ -14,6 +14,25 @@ ZoteroGitHubSync.Importer = {
 
 
 	/**
+	 * Split a repository file path into the segments to join onto a local
+	 * directory. A Git tree is not supposed to carry `.`, `..` or an empty
+	 * component, but it comes from the server, so check instead of trusting it:
+	 * a path like `../../evil` would otherwise write outside the attachment's
+	 * storage folder.
+	 *
+	 * @param {String} name - Path relative to the attachment's folder in the repository
+	 * @return {String[]|null} The segments, or null if the path leaves the folder
+	 */
+	safeSegments(name) {
+		let segments = String(name || '').split('/');
+		if (!segments.length || segments.some(s => !s || s === '.' || s === '..' || s.includes('\\'))) {
+			return null;
+		}
+		return segments;
+	},
+
+
+	/**
 	 * @param {Object} options
 	 * @param {Object} options.config
 	 * @param {String} options.token
@@ -501,10 +520,16 @@ ZoteroGitHubSync.Importer = {
 
 			for (let entry of entries) {
 				let label = `${key}/${entry.name}`;
+				let segments = this.safeSegments(entry.name);
+				if (!segments) {
+					totals.failures.push(`${label}: the repository path leaves the attachment folder`);
+					continue;
+				}
 				let both = keepBoth.has(entry.path);
+				let tempRoot = PathUtils.join(Zotero.getTempDirectory().path, `zgs-copy-${key}`);
 				let target = both
-					? PathUtils.join(Zotero.getTempDirectory().path, `zgs-copy-${key}`, ...entry.name.split('/'))
-					: PathUtils.join(storageDir, ...entry.name.split('/'));
+					? PathUtils.join(tempRoot, ...segments)
+					: PathUtils.join(storageDir, ...segments);
 				try {
 					let pointer = null;
 					let size = entry.size;
@@ -533,7 +558,7 @@ ZoteroGitHubSync.Importer = {
 						}
 					}
 					if (both) {
-						copies.push({ attachment, target, name: entry.name });
+						copies.push({ attachment, target, tempRoot, name: entry.name });
 					}
 					if (pointer) {
 						lfsTargets.push({ ...pointer, path: target, label });
@@ -584,11 +609,18 @@ ZoteroGitHubSync.Importer = {
 				if (imported) {
 					written++;
 				}
-				await IOUtils.remove(PathUtils.parent(renamed), { recursive: true, ignoreAbsent: true });
 			}
 			catch (e) {
 				totals.failures.push(`${copy.attachment.key}/${copy.name}: could not keep the GitHub copy: ${e.message || e}`);
 			}
+		}
+		// One temp folder holds every file of a multi-file attachment, so it can
+		// only go once they have all been imported
+		for (let root of new Set(copies.map(c => c.tempRoot))) {
+			try {
+				await IOUtils.remove(root, { recursive: true, ignoreAbsent: true });
+			}
+			catch (e) {}
 		}
 		return written;
 	},
