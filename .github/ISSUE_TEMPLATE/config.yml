@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Question about using the plugin
+    url: https://github.com/situkangsayur/zotero-github-plugin/discussions
+    about: Ask here if it is not a bug or a change request.

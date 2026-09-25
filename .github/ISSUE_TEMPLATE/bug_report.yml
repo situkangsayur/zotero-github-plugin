@@ -1,0 +1,37 @@
+name: Bug report
+description: Something does not work the way it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. Please remove your access token, API key and anything
+        private from logs before pasting them.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: Plugin version (Tools → Add-ons), Zotero version, operating system.
+      placeholder: "Zotero GitHub Sync 0.0.0, Zotero 7.0.x, Ubuntu 24.04"
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Debug output
+      description: >
+        The relevant part of Help → Debug Output Logging → View Output. Secrets removed.
+      render: text
+  - type: checkboxes
+    id: help
+    attributes:
+      label: Would you like to fix it yourself?
+      options:
+        - label: I would like to work on this (see CONTRIBUTING.md)

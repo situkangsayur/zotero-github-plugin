@@ -1,0 +1,22 @@
+name: Idea or change
+description: Something the plugin should do, or do differently
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What should it do
+      description: What you would like, and what you are trying to get done with it.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you do today
+      description: How you work around it now, if you do.
+  - type: checkboxes
+    id: help
+    attributes:
+      label: Would you like to build it?
+      options:
+        - label: I would like to work on this (see CONTRIBUTING.md)

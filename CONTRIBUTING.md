@@ -17,6 +17,22 @@ Security issues: please write to the address in the repository's GitHub profile,
 that only describes the problem in general terms — not a working exploit — and we will take it
 from there.
 
+## Work in progress
+
+Issues and pull requests are tracked on a GitHub **Project** board (the *Projects* tab of this
+repository), so every report and every piece of work is a card with a status: *Todo*, *In
+progress*, *Done*. It is there so two people don't quietly do the same thing.
+
+- Want to work on something? Say so in the issue — a comment is enough — and it is moved to
+  *In progress* with your name on it. No need to wait for a reply to start, but the comment
+  saves someone else the duplicate work.
+- New to the code? The cards marked *good first issue* are the small, self-contained ones.
+- Sending a pull request without an issue is fine too; a card is made for it.
+
+*Semua issue dan pull request dicatat di papan GitHub Project (tab Projects di repo ini),
+jadi setiap laporan dan pekerjaan punya kartu dengan status Todo / In progress / Done.
+Kalau mau mengerjakan sesuatu, cukup berkomentar di issue-nya.*
+
 ## Sending a pull request
 
 ```bash
