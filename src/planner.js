@@ -73,6 +73,8 @@ ZoteroGitHubSync.Planner = {
 			overwrite: [],
 			// Deleted on the server but still in this library
 			restore: [],
+			// Gone from this library, but left on the server because pruning is off
+			retained: [],
 			// No base, both sides have it and they differ: resolved by comparing
 			// dates where possible, otherwise treated as a conflict
 			diverged: [],
@@ -105,8 +107,17 @@ ZoteroGitHubSync.Planner = {
 				}
 				else if (b !== undefined && r === b) {
 					// We had it at the last sync and it's gone here now
-					if (prune && (!managed || managed.has(path))) {
-						plan.delete.push(path);
+					if (!managed || managed.has(path)) {
+						if (prune) {
+							plan.delete.push(path);
+						}
+						else {
+							// Left on the server on purpose. It is remembered as it
+							// is, so the next sync neither offers it back as an
+							// import nor forgets that it is ours to remove later
+							plan.retained.push(path);
+							plan.unchanged.push(path);
+						}
 					}
 					else {
 						plan.unchanged.push(path);
@@ -200,15 +211,15 @@ ZoteroGitHubSync.Planner = {
 	 * @param {Set<String>} [options.kept]
 	 * @return {Map<String, String>}
 	 */
-	nextBase({ local, remote, base, undecided, kept = new Set() }) {
+	nextBase({ local, remote, base, undecided, kept = new Set(), retained = new Set() }) {
 		let next = new Map();
 		let paths = new Set([...local.keys(), ...remote.keys(), ...(base ? base.keys() : [])]);
 		for (let path of paths) {
-			if (undecided.has(path) || kept.has(path)) {
+			if (undecided.has(path) || kept.has(path) || retained.has(path)) {
 				if (base?.has(path)) {
 					next.set(path, base.get(path));
 				}
-				else if (kept.has(path) && remote.has(path)) {
+				else if ((kept.has(path) || retained.has(path)) && remote.has(path)) {
 					next.set(path, remote.get(path));
 				}
 				continue;

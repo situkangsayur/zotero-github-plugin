@@ -473,7 +473,13 @@ ZoteroGitHubSync.Sync = {
 		let isFullSync = !items;
 		let previousManaged = isFullSync ? await this._readPreviousFileList(client, remoteFiles, prefix) : [];
 		if (isFullSync) {
-			let managed = [...new Set([...files.keys(), ...kept])].sort();
+			// With pruning off, the files of items deleted here stay on the server,
+			// so they have to stay in the list as well: it is what tells a later
+			// sync which files are this plugin's to remove
+			let orphans = config.prune
+				? []
+				: previousManaged.filter(relPath => remote.has(relPath) && !files.has(relPath));
+			let managed = [...new Set([...files.keys(), ...kept, ...orphans])].sort();
 			files.set(this.FILE_LIST_PATH, {
 				bytes: Utils.encode(ZoteroGitHubSync.Exporter.stableStringify(managed) + '\n'),
 			});
@@ -645,7 +651,7 @@ ZoteroGitHubSync.Sync = {
 				// A partial sync can't vouch for paths it didn't export
 				return;
 			}
-			let nextBase = Planner.nextBase({ local, remote: after, base, undecided, kept });
+			let nextBase = Planner.nextBase({ local, remote: after, base, undecided, kept, retained: new Set(plan.retained) });
 			if (!isFullSync && base) {
 				// Keep what the partial sync didn't look at
 				for (let [path, sha] of base) {

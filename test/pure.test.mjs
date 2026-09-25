@@ -148,6 +148,17 @@ assert.equal(P.importable(MD('Title (ABCD1234)')), null);
 	assert.deepEqual(noPrune.delete, []);
 	assert.ok(noPrune.unchanged.includes(ITEM('EEEEEEEE')));
 	assert.deepEqual(noPrune.push, [ITEM('BBBBBBBB'), ITEM('NNNNNNNN')]);
+	assert.deepEqual(noPrune.retained, [ITEM('EEEEEEEE')]);
+	// ... and it is remembered, so the next sync neither re-imports it nor forgets it
+	const kept1 = new Set([FILE('KKKKKKKK', 'x.pdf')]);
+	const afterSync = new Map(remote);
+	const base2 = P.nextBase({ local, remote: afterSync, base, undecided: new Set(), kept: kept1, retained: new Set(noPrune.retained) });
+	assert.equal(base2.get(ITEM('EEEEEEEE')), 'e1');
+	const later = P.plan({ local, remote, base: base2, kept: kept1, prune: true });
+	assert.deepEqual(later.delete, [ITEM('EEEEEEEE')]);
+	// without it the deleted item would come back as an import
+	const forgotten = P.nextBase({ local, remote: afterSync, base, undecided: new Set(), kept: kept1 });
+	assert.equal(forgotten.has(ITEM('EEEEEEEE')), false);
 
 	// After a sync that skipped the undecided paths, they keep their old base
 	const undecided = new Set([...plan.incoming, ...plan.conflicts, ...plan.overwrite, ...plan.restore]);
